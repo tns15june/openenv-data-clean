@@ -14,6 +14,7 @@ MANDATORY
 import json
 import os
 import re
+import sys
 import textwrap
 from typing import Any, Dict, List
 
@@ -28,7 +29,7 @@ MODEL_NAME = os.getenv("MODEL_NAME", "")
 ENV_URL = os.getenv("ENV_URL", "http://localhost:8000")
 
 TEMPERATURE = 0.0
-MAX_TOKENS = 150
+MAX_TOKENS = 300
 
 TASKS = ["customer_contacts", "sales_records", "employee_records"]
 
@@ -36,8 +37,8 @@ TASKS = ["customer_contacts", "sales_records", "employee_records"]
 # System prompt
 # ---------------------------------------------------------------------------
 SYSTEM_PROMPT = textwrap.dedent("""\
-    You are a data quality analyst. You are given a dataset with known issues.
-    Your job is to find and fix all data quality problems.
+    You are an expert data quality analyst. You are given a dataset with known issues.
+    Your job is to find and fix ALL data quality problems efficiently.
 
     Available commands (respond with EXACTLY ONE command per turn, no explanation):
       inspect("column_name")                — View column statistics and issues
@@ -45,28 +46,31 @@ SYSTEM_PROMPT = textwrap.dedent("""\
       delete(row_index)                      — Remove a duplicate/invalid row
       submit()                               — Finalize and get your score
 
-    Strategy:
-    1. Start by inspecting columns to understand the data and find issues
-    2. Fix issues one by one using the fix() command
-    3. For duplicate rows, use delete() on the duplicate (usually the later row)
-    4. After fixing all issues, use submit()
+    STRATEGY (follow this order strictly):
+    1. You will first receive inspection results for all columns — read them carefully
+    2. Look at the data table and identify ALL issues based on the inspection hints
+    3. Fix ALL issues using fix() commands, one at a time
+    4. Delete duplicate rows LAST (after all fixes), from highest row index to lowest
+       (this avoids row index shifting problems)
+    5. Only call submit() when you believe ALL issues are fixed
 
-    Rules for fixes:
-    - Emails: must be user@domain.tld format
-    - Phone numbers: digits and dashes only, at least 10 digits
-    - Dates: must be YYYY-MM-DD format and valid
-    - Empty/missing values: provide a reasonable non-empty value
-    - Negative numbers (quantity/price): make them positive
-    - Outliers: fix to a reasonable value within the stated range
-    - Inconsistent names: use the exact canonical form stated in the task
-    - Excess whitespace: trim and remove double spaces
-    - Manager IDs: must reference an existing employee ID in the dataset
+    VALIDATION RULES:
+    - Emails: must match user@domain.tld (no [at], no @@, no spaces)
+    - Phone numbers: digits, dashes, parens, spaces only; at least 10 digits
+    - Dates: YYYY-MM-DD format (e.g., 2024-03-25), must be valid calendar date
+    - Empty/missing values: provide a reasonable non-empty value matching context
+    - Negative numbers (quantity/price): make them positive (use absolute value)
+    - Price/salary outliers: fix to a reasonable value within the stated range
+    - Inconsistent region/department names: use the EXACT canonical form from the task description
+    - Excess whitespace: trim leading/trailing spaces, collapse double spaces to single
+    - Manager IDs: must reference an existing employee emp_id in the dataset
     - Performance scores: must be within 0.0-10.0
     - Salaries: must be within $20,000-$500,000
-    - Termination dates: must be after hire date (or empty if active)
+    - Termination dates: must be AFTER hire date, or leave empty if employee is active
+    - Duplicate rows: rows that are exact or near-exact copies — delete the LATER one
 
     IMPORTANT: After deleting a row, all subsequent row indices shift down by 1.
-    Account for this when fixing or deleting later rows.
+    Always delete from highest index to lowest to avoid this issue.
 
     Respond with ONLY the command. No explanation, no markdown, no extra text.
 """)
@@ -93,7 +97,7 @@ def env_step(command: str) -> Dict[str, Any]:
     """Execute a command in the environment."""
     resp = requests.post(
         f"{ENV_URL}/step",
-        json={"command": command},
+        json={"action": {"command": command}},
         timeout=30,
     )
     resp.raise_for_status()
@@ -152,10 +156,8 @@ def extract_action(response_text: str) -> str:
         # Strip "action:" prefix
         line = re.sub(r"^(?:action|next action)\s*[:\-]\s*", "", line, flags=re.IGNORECASE)
         if ACTION_RE.search(line):
-            # Extract just the action
             m = ACTION_RE.search(line)
             start = m.start()
-            # Find matching closing paren
             depth = 0
             for i in range(start, len(line)):
                 if line[i] == "(":
@@ -164,10 +166,8 @@ def extract_action(response_text: str) -> str:
                     depth -= 1
                     if depth == 0:
                         return line[start : i + 1]
-            # No matching paren — return what we have plus )
             return line[start:] + ")"
 
-    # Fallback: return submit
     return "submit()"
 
 
@@ -184,22 +184,58 @@ def main() -> None:
         print(f"{'=' * 60}")
 
         obs = env_reset(task_id)
-        # The response might have observation nested or flat
         if "observation" in obs:
             obs = obs["observation"]
 
         done = obs.get("done", False)
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
+        # --- Phase 1: Auto-inspect all columns ---
+        columns = []
+        col_info = obs.get("column_info", "")
+        for line in col_info.strip().splitlines():
+            line = line.strip()
+            if ":" in line:
+                col_name = line.split(":")[0].strip()
+                if col_name:
+                    columns.append(col_name)
+
+        inspection_results = []
         step_num = 0
+        for col in columns:
+            if done:
+                break
+            step_num += 1
+            cmd = f'inspect("{col}")'
+            print(f"  Step {step_num}: {cmd}")
+            obs = env_step(cmd)
+            if "observation" in obs:
+                obs = obs["observation"]
+            done = obs.get("done", False)
+            feedback = obs.get("feedback", "")
+            inspection_results.append(f"[{col}]: {feedback}")
+
+        if done:
+            score = obs.get("current_score", 0.0)
+            print(f"  Done during inspection! Score: {score:.4f}")
+            results[task_id] = score
+            continue
+
+        # Build a summary of all inspections for the LLM
+        inspection_summary = "\n\n".join(inspection_results)
+        initial_context = format_observation(obs, step_num)
+        initial_context += f"\n\n--- INSPECTION SUMMARY (all columns) ---\n{inspection_summary}"
+        initial_context += "\n\n--- NOW FIX ALL ISSUES. Do fixes first, then deletions (highest index first). ---"
+
+        messages.append({"role": "user", "content": initial_context})
+
+        # --- Phase 2: LLM-driven fixes ---
         while not done:
             step_num += 1
-            user_msg = format_observation(obs, step_num)
-            messages.append({"role": "user", "content": user_msg})
 
-            # Keep conversation manageable — trim if too long
-            if len(messages) > 20:
-                messages = [messages[0]] + messages[-18:]
+            # Keep conversation manageable — but preserve system + initial context
+            if len(messages) > 40:
+                messages = [messages[0], messages[1]] + messages[-36:]
 
             try:
                 completion = client.chat.completions.create(
@@ -226,9 +262,12 @@ def main() -> None:
             score = obs.get("current_score", 0.0)
 
             if done:
-                reward = obs.get("reward", score)
                 print(f"  Done! Score: {score:.4f}")
                 results[task_id] = score
+            else:
+                # Send updated observation as next user message
+                user_msg = format_observation(obs, step_num)
+                messages.append({"role": "user", "content": user_msg})
 
         print(f"  Final score for {task_id}: {results.get(task_id, 0.0):.4f}")
 
