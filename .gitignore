@@ -12,5 +12,6 @@ venv/
 ENV/
 .claude/
 *.lock
+!uv.lock
 .DS_Store
 Thumbs.db

@@ -3,7 +3,10 @@
 from openenv.core.env_client import EnvClient
 from openenv.core.client_types import StepResult
 
-from .models import DataCleanAction, DataCleanObservation, DataCleanState
+try:
+    from .models import DataCleanAction, DataCleanObservation, DataCleanState
+except ImportError:
+    from models import DataCleanAction, DataCleanObservation, DataCleanState
 
 
 class DataCleanEnv(EnvClient[DataCleanAction, DataCleanObservation, DataCleanState]):
