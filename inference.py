@@ -94,7 +94,7 @@ def env_step(command: str) -> Dict[str, Any]:
     """Execute a command in the environment."""
     resp = requests.post(
         f"{ENV_URL}/step",
-        json={"command": command},
+        json={"action": {"command": command}},
         timeout=30,
     )
     resp.raise_for_status()

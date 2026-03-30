@@ -1,3 +1,12 @@
+---
+title: DataCleanEnv
+emoji: 🧹
+colorFrom: blue
+colorTo: green
+sdk: docker
+app_port: 8000
+---
+
 # DataCleanEnv — Data Quality Analysis & Cleaning Environment
 
 A real-world OpenEnv environment where AI agents learn to identify and fix data quality issues through iterative inspection, correction, and validation.
