@@ -288,7 +288,7 @@ class DataCleanEnvironment(Environment):
             # Agent is modifying a cell that had no known issue — damage
             self._current_data[row_idx][col] = new_value
             self._damaged_cells += 1
-            self._score = max(0.0, self._score - 0.05)
+            self._recompute_score()
             return (
                 f"Warning: Row {row_idx}, column '{col}' had no known issue. "
                 f"Original value '{old_value}' was overwritten. Penalty applied (-0.05)."
@@ -313,7 +313,7 @@ class DataCleanEnvironment(Environment):
                 reward_delta += 1.0 / len(self._task.issues)
                 fixed_any = True
 
-        self._score = min(1.0, max(0.0, self._score + reward_delta))
+        self._recompute_score()
 
         if fixed_any:
             return (
@@ -337,7 +337,6 @@ class DataCleanEnvironment(Environment):
         deleted_row = self._current_data[row_idx]
 
         # Check if this row is a known duplicate
-        reward_delta = 0.0
         is_duplicate = False
         for issue in self._task.issues:
             if issue.issue_type != "duplicate_row":
@@ -347,21 +346,18 @@ class DataCleanEnvironment(Environment):
             if self._issue_status.get(issue.issue_id, False):
                 continue
 
-            # The agent is deleting the row that matches the duplicate issue
             self._issue_status[issue.issue_id] = True
-            reward_delta += 1.0 / len(self._task.issues)
             is_duplicate = True
 
         if not is_duplicate:
             # Deleting a non-duplicate row — penalty
             self._damaged_cells += 1
-            reward_delta = -0.05
 
         # Actually remove the row
         self._current_data.pop(row_idx)
         self._row_index_map.pop(row_idx)
 
-        self._score = min(1.0, max(0.0, self._score + reward_delta))
+        self._recompute_score()
 
         if is_duplicate:
             return (
@@ -380,7 +376,8 @@ class DataCleanEnvironment(Environment):
     def _check_issue_resolved(self, issue: Issue) -> bool:
         """Check if an issue is resolved in the current data."""
         if issue.issue_type == "duplicate_row":
-            return validate_row_deleted(self._current_data, issue.original_row_data)
+            # Row is resolved if it was deleted (no longer in index map)
+            return self._find_current_row(issue.row) is None
 
         if issue.issue_type == "temporal_inconsistency":
             # Find the row by original index
@@ -424,6 +421,17 @@ class DataCleanEnvironment(Environment):
             except (ValueError, TypeError):
                 return new_value
         return new_value
+
+    def _recompute_score(self) -> None:
+        """Recompute running score based on current issue states and damage."""
+        total = len(self._task.issues)
+        if total == 0:
+            self._score = 1.0
+            return
+        resolved = sum(1 for v in self._issue_status.values() if v)
+        self._score = resolved / total
+        self._score = max(0.0, self._score - self._damaged_cells * 0.05)
+        self._score = min(1.0, self._score)
 
     def _compute_final_score(self) -> None:
         """Recompute score based on all current issue states."""

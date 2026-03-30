@@ -7,9 +7,6 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends git curl && \
     rm -rf /var/lib/apt/lists/*
 
-# Copy everything
-COPY . /app
-
 # Install Python dependencies
 RUN pip install --no-cache-dir \
     "openenv-core>=0.2.3" \
@@ -19,7 +16,14 @@ RUN pip install --no-cache-dir \
     "requests>=2.31.0" \
     "openai>=1.0.0"
 
-ENV PYTHONPATH="/app:$PYTHONPATH"
+# Copy everything
+COPY . /app
+
+# Create non-root user (required by HF Spaces)
+RUN useradd -m -u 1000 user && chown -R user:user /app
+USER user
+
+ENV PYTHONPATH="/app"
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" || exit 1

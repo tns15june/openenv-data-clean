@@ -1,9 +1,10 @@
 """FastAPI application for the DataClean Environment."""
 
+import asyncio
+
 from fastapi import FastAPI, Body
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 try:
     from .environment import DataCleanEnvironment
@@ -16,8 +17,9 @@ except ImportError:
 
 app = FastAPI(title="DataCleanEnv", version="1.0.0")
 
-# Shared stateful environment instance
+# Shared stateful environment instance with lock for concurrent safety
 _env = DataCleanEnvironment()
+_env_lock = asyncio.Lock()
 
 
 # ---------------------------------------------------------------------------
@@ -49,14 +51,16 @@ async def health():
 
 @app.post("/reset")
 async def reset(request: ResetRequest = Body(default_factory=ResetRequest)):
-    obs = _env.reset(seed=request.seed, episode_id=request.episode_id, task_id=request.task_id)
+    async with _env_lock:
+        obs = _env.reset(seed=request.seed, episode_id=request.episode_id, task_id=request.task_id)
     return {"observation": _obs_dict(obs), "reward": None, "done": False}
 
 
 @app.post("/step")
 async def step(request: StepRequest):
     action = DataCleanAction(**request.action)
-    obs = _env.step(action)
+    async with _env_lock:
+        obs = _env.step(action)
     return {"observation": _obs_dict(obs), "reward": obs.reward, "done": obs.done}
 
 

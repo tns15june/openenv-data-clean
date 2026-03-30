@@ -20,7 +20,7 @@ class DataCleanEnv(EnvClient[DataCleanAction, DataCleanObservation, DataCleanSta
     """
 
     def _step_payload(self, action: DataCleanAction) -> dict:
-        return action.model_dump()
+        return {"action": action.model_dump()}
 
     def _parse_result(self, payload: dict) -> StepResult[DataCleanObservation]:
         obs = DataCleanObservation(**payload.get("observation", payload))
