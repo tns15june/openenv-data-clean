@@ -32,49 +32,39 @@ ENV_URL = os.getenv("ENV_URL", "http://localhost:8000")
 TASKS = ["customer_contacts", "sales_records", "employee_records", "financial_transactions"]
 
 # ---------------------------------------------------------------------------
-# System prompt — Plan-Then-Execute strategy
+# System prompt — Conservative plan-then-execute
 # ---------------------------------------------------------------------------
 PLANNING_PROMPT = textwrap.dedent("""\
-    You are an expert data quality analyst. You will be given:
-    1. A dataset with known quality issues
-    2. Inspection results for every column
-    3. Validation rules
+    You are a data quality analyst. You will receive a dataset, inspection results,
+    and validation rules. Produce a PRECISE fix plan as a JSON array.
 
-    Your job: Analyze ALL the data and produce a COMPLETE fix plan as a JSON array.
+    CRITICAL RULES:
+    - ONLY fix cells that inspection flagged as having issues (suspicious values, wrong format, etc.)
+    - If inspection shows "Issues remaining in this column: 0", do NOT touch that column
+    - Do NOT fix cells that already have correct values
+    - Each wrong fix costs -0.05 penalty. Be CONSERVATIVE.
+    - For duplicate rows (two identical rows), use "delete" on the LATER row
+    - List all "fix" actions first, then all "delete" actions
+    - Delete from highest row index to lowest
 
-    OUTPUT FORMAT — respond with ONLY a JSON array, no other text:
-    [
-      {"action": "fix", "row": 3, "column": "email", "value": "alice@mail.com"},
-      {"action": "fix", "row": 7, "column": "phone", "value": "555-012-3408"},
-      {"action": "delete", "row": 14},
-      ...
-    ]
+    VALIDATION RULES:
+    - Emails: user@domain.tld (no [at], no @@, no spaces, no missing domain)
+    - Phones: digits and dashes only, 10+ digits (no letters)
+    - Dates: YYYY-MM-DD only (not MM/DD/YYYY, not slashes, valid calendar date)
+    - Empty values: provide a reasonable non-empty value
+    - Negative numbers: use the absolute value (make positive)
+    - Outliers: fix to a reasonable mid-range value within the stated bounds
+    - Inconsistent format: use the EXACT canonical form listed in the task description
+    - Whitespace: trim leading/trailing, collapse double spaces to single
+    - Salaries: must be $20,000-$500,000
+    - Performance scores: must be 0.0-10.0
+    - Currency: must be ISO code (USD, EUR, GBP, JPY, CAD)
+    - Reviewer IDs: approved/flagged status requires a reviewer_id
 
-    RULES:
-    - Emails: user@domain.tld format (no [at], no @@, no spaces)
-    - Phone numbers: digits and dashes only, at least 10 digits
-    - Dates: YYYY-MM-DD format, must be valid calendar date
-    - Empty/missing values: provide a reasonable value matching the column context
-    - Negative numbers: make them positive (absolute value)
-    - Outliers: fix to a reasonable value within the stated range
-    - Inconsistent names/categories: use the EXACT canonical form from the task description
-    - Excess whitespace: trim and collapse double spaces
-    - Currency codes: use ISO format (USD, EUR, GBP, JPY, CAD)
-    - Manager/reviewer IDs: must reference an existing valid ID
-    - Performance scores: within 0.0-10.0
-    - Salaries: within $20,000-$500,000
-    - Termination dates: must be after hire date, or empty if active
-    - Approved/flagged transactions: must have a reviewer_id
-    - Duplicates: use "delete" action on the LATER duplicate row
+    OUTPUT: Respond with ONLY a JSON array. No explanation, no markdown, no text before or after.
 
-    CRITICAL — DELETION ORDER:
-    List ALL fix actions first, then ALL delete actions.
-    Delete rows from HIGHEST index to LOWEST (to avoid index shifting).
-
-    IMPORTANT: Only fix cells that actually have issues. Do NOT touch correct data.
-    Be conservative — a wrong fix costs -0.05 penalty.
-
-    Respond with ONLY the JSON array. No explanation, no markdown fences, no other text.
+    EXAMPLE for a 3-issue dataset:
+    [{"action":"fix","row":3,"column":"email","value":"alice@mail.com"},{"action":"fix","row":7,"column":"phone","value":"555-012-3408"},{"action":"delete","row":14}]
 """)
 
 
@@ -101,10 +91,8 @@ def env_step(command: str) -> Dict[str, Any]:
 # JSON plan extraction
 # ---------------------------------------------------------------------------
 def extract_json_plan(text: str) -> Optional[List[Dict]]:
-    """Extract a JSON array from LLM response, handling markdown fences."""
     if not text:
         return None
-    # Strip markdown code fences
     text = re.sub(r"^```(?:json)?\s*\n?", "", text.strip())
     text = re.sub(r"\n?```\s*$", "", text.strip())
     try:
@@ -113,7 +101,6 @@ def extract_json_plan(text: str) -> Optional[List[Dict]]:
             return plan
     except json.JSONDecodeError:
         pass
-    # Try to find JSON array in the text
     match = re.search(r"\[[\s\S]*\]", text)
     if match:
         try:
@@ -126,12 +113,11 @@ def extract_json_plan(text: str) -> Optional[List[Dict]]:
 
 
 def plan_to_command(action: Dict) -> Optional[str]:
-    """Convert a plan action dict to an environment command string."""
     act_type = action.get("action", "")
     if act_type == "fix":
         row = action.get("row", 0)
         col = action.get("column", "")
-        val = action.get("value", "")
+        val = str(action.get("value", ""))
         return f'fix({row}, "{col}", "{val}")'
     elif act_type == "delete":
         row = action.get("row", 0)
@@ -140,7 +126,7 @@ def plan_to_command(action: Dict) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
-# Fallback: single-action extraction for error recovery
+# Fallback: single-action extraction
 # ---------------------------------------------------------------------------
 ACTION_RE = re.compile(r"(inspect|fix|delete|submit)\s*\(", re.IGNORECASE)
 
@@ -171,26 +157,6 @@ def extract_action(response_text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Format observation for LLM context
-# ---------------------------------------------------------------------------
-def format_observation(obs: Dict[str, Any]) -> str:
-    parts = [
-        f"Task: {obs.get('task_id', '?')} ({obs.get('difficulty', '?')})",
-        f"Total issues: {obs.get('total_issues', 0)}",
-        "",
-        "Task description:",
-        obs.get("task_description", ""),
-        "",
-        "Column info:",
-        obs.get("column_info", ""),
-        "",
-        "Current data:",
-        obs.get("data_preview", ""),
-    ]
-    return "\n".join(parts)
-
-
-# ---------------------------------------------------------------------------
 # Main — Plan-Then-Execute
 # ---------------------------------------------------------------------------
 def main() -> None:
@@ -212,7 +178,6 @@ def main() -> None:
             continue
 
         total_issues = obs.get("total_issues", 0)
-        max_steps = obs.get("actions_remaining", 0)
 
         # --- Phase 1: Auto-inspect all columns ---
         columns = []
@@ -224,7 +189,7 @@ def main() -> None:
                 if col_name:
                     columns.append(col_name)
 
-        inspection_results = []
+        inspection_results = {}
         step_count = 0
         for col in columns:
             if done:
@@ -236,27 +201,49 @@ def main() -> None:
             if "observation" in obs:
                 obs = obs["observation"]
             done = obs.get("done", False)
-            inspection_results.append(obs.get("feedback", ""))
+            feedback = obs.get("feedback", "")
+            inspection_results[col] = feedback
 
         if done:
             results[task_id] = obs.get("current_score", 0.0)
             print(f"  Done during inspection. Score: {results[task_id]:.4f}")
             continue
 
-        # --- Phase 2: Ask LLM to plan ALL fixes in ONE call ---
-        context = format_observation(obs)
-        inspection_text = "\n\n".join(
-            f"[Column: {col}]\n{result}"
-            for col, result in zip(columns, inspection_results)
-        )
+        # --- Phase 1.5: Filter to only columns WITH issues ---
+        flagged_inspections = {}
+        for col, feedback in inspection_results.items():
+            # Extract "Issues remaining in this column: N"
+            m = re.search(r"Issues remaining in this column:\s*(\d+)", feedback)
+            issue_count = int(m.group(1)) if m else 0
+            if issue_count > 0:
+                flagged_inspections[col] = feedback
+
+        # Also check for suspicious values in inspection even if issue count is 0
+        for col, feedback in inspection_results.items():
+            if col not in flagged_inspections and "Suspicious:" in feedback:
+                flagged_inspections[col] = feedback
+
+        print(f"  Columns with issues: {list(flagged_inspections.keys())} ({len(flagged_inspections)}/{len(columns)})")
+
+        # --- Phase 2: Ask LLM to plan fixes ---
+        # Only show the LLM columns that have issues + the data table
+        if flagged_inspections:
+            inspection_text = "\n\n".join(
+                f"[{col}]\n{fb}" for col, fb in flagged_inspections.items()
+            )
+        else:
+            inspection_text = "(No specific column issues flagged. Check for duplicate rows.)"
 
         planning_message = (
-            f"{context}\n\n"
-            f"--- INSPECTION RESULTS ---\n{inspection_text}\n\n"
-            f"--- PLAN YOUR FIXES ---\n"
-            f"Remaining steps: {obs.get('actions_remaining', 0)} (includes submit).\n"
-            f"Total issues to fix: {total_issues}.\n"
-            f"Output ONLY a JSON array of fix/delete actions."
+            f"Task: {obs.get('task_id', '?')} ({obs.get('difficulty', '?')})\n"
+            f"Total issues to find and fix: {total_issues}\n\n"
+            f"Task description:\n{obs.get('task_description', '')}\n\n"
+            f"Column definitions:\n{obs.get('column_info', '')}\n\n"
+            f"FLAGGED COLUMNS (only fix cells in these columns or duplicate rows):\n{inspection_text}\n\n"
+            f"Current data:\n{obs.get('data_preview', '')}\n\n"
+            f"Produce a JSON array with EXACTLY the fixes needed. "
+            f"Expected: around {total_issues} actions (fixes + deletes). "
+            f"Do NOT produce more than {total_issues + 3} actions."
         )
 
         print(f"  Calling LLM for fix plan...")
@@ -274,23 +261,27 @@ def main() -> None:
             plan_text = completion.choices[0].message.content or ""
         except Exception as exc:
             print(f"  LLM error: {exc}. Submitting.")
-            env_step("submit()")
-            obs_final = env_step("submit()")
-            if "observation" in obs_final:
-                obs_final = obs_final["observation"]
-            results[task_id] = obs_final.get("current_score", 0.0)
+            obs = env_step("submit()")
+            if "observation" in obs:
+                obs = obs["observation"]
+            results[task_id] = obs.get("current_score", 0.0)
             continue
 
         plan = extract_json_plan(plan_text)
+
+        # --- Sanity check: reject bloated plans ---
+        if plan and len(plan) > total_issues + 5:
+            print(f"  Plan too large ({len(plan)} actions for {total_issues} issues). Trimming to {total_issues + 3}.")
+            plan = plan[:total_issues + 3]
+
         if not plan:
             print(f"  Failed to parse JSON plan. Falling back to single-action mode.")
-            # Degraded recovery: use the LLM response as individual actions
-            # Re-query LLM in single-action mode for remaining steps
             fallback_messages = [
                 {"role": "system", "content": (
                     "You are a data quality analyst. Respond with EXACTLY ONE command per turn.\n"
                     "Commands: inspect(\"col\"), fix(row, \"col\", \"val\"), delete(row), submit()\n"
-                    "Respond with ONLY the command. No explanation."
+                    "ONLY fix cells with actual issues. Do NOT fix correct data.\n"
+                    "Respond with ONLY the command."
                 )},
                 {"role": "user", "content": planning_message},
             ]
@@ -318,19 +309,19 @@ def main() -> None:
                 remaining = obs.get("actions_remaining", 0)
                 if not done:
                     fb = obs.get("feedback", "")
-                    fallback_messages.append({"role": "user", "content": f"Result: {fb}\nIssues fixed: {obs.get('issues_fixed',0)}/{obs.get('total_issues',0)}. Actions remaining: {remaining}. Next command?"})
+                    fallback_messages.append({"role": "user", "content": f"Result: {fb}\nFixed: {obs.get('issues_fixed',0)}/{obs.get('total_issues',0)}. Remaining steps: {remaining}."})
                 if len(fallback_messages) > 30:
                     fallback_messages = [fallback_messages[0]] + fallback_messages[-28:]
             results[task_id] = obs.get("current_score", 0.0)
             print(f"  Final score for {task_id}: {results[task_id]:.4f}")
             continue
 
-        print(f"  Plan has {len(plan)} actions.")
+        print(f"  Plan has {len(plan)} actions (expected ~{total_issues}).")
 
         # --- Phase 3: Execute plan ---
         remaining = obs.get("actions_remaining", 0)
         for i, action_item in enumerate(plan):
-            if done or remaining <= 1:  # Save 1 step for submit
+            if done or remaining <= 1:
                 break
 
             cmd = plan_to_command(action_item)
@@ -338,7 +329,6 @@ def main() -> None:
                 continue
 
             step_count += 1
-            remaining -= 1
             print(f"  Step {step_count}: {cmd}")
             obs = env_step(cmd)
             if "observation" in obs:
@@ -348,7 +338,6 @@ def main() -> None:
 
             feedback = obs.get("feedback", "")
             if "not yet resolved" in feedback.lower() and not done:
-                # Fix didn't work — we'll continue with the plan, no retry to save steps
                 print(f"    Warning: {feedback[:80]}")
 
         # --- Phase 4: Submit ---
