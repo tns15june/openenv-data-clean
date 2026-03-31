@@ -490,7 +490,7 @@ class DataCleanEnvironment(Environment):
 
         return DataCleanObservation(
             done=done,
-            reward=self._score if done else None,
+            reward=self._score,
             task_id=task.task_id,
             task_description=task.description,
             difficulty=task.difficulty,

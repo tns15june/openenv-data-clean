@@ -283,9 +283,47 @@ def main() -> None:
 
         plan = extract_json_plan(plan_text)
         if not plan:
-            print(f"  Failed to parse plan. Raw: {plan_text[:200]}...")
-            # Fallback: try single action extraction loop
-            plan = []
+            print(f"  Failed to parse JSON plan. Falling back to single-action mode.")
+            # Degraded recovery: use the LLM response as individual actions
+            # Re-query LLM in single-action mode for remaining steps
+            fallback_messages = [
+                {"role": "system", "content": (
+                    "You are a data quality analyst. Respond with EXACTLY ONE command per turn.\n"
+                    "Commands: inspect(\"col\"), fix(row, \"col\", \"val\"), delete(row), submit()\n"
+                    "Respond with ONLY the command. No explanation."
+                )},
+                {"role": "user", "content": planning_message},
+            ]
+            remaining = obs.get("actions_remaining", 0)
+            while not done and remaining > 0:
+                try:
+                    comp = client.chat.completions.create(
+                        model=MODEL_NAME,
+                        messages=fallback_messages,
+                        temperature=0.0,
+                        max_tokens=300,
+                        stream=False,
+                    )
+                    resp_text = comp.choices[0].message.content or ""
+                except Exception:
+                    resp_text = "submit()"
+                action_cmd = extract_action(resp_text)
+                fallback_messages.append({"role": "assistant", "content": action_cmd})
+                step_count += 1
+                print(f"  Step {step_count} (fallback): {action_cmd}")
+                obs = env_step(action_cmd)
+                if "observation" in obs:
+                    obs = obs["observation"]
+                done = obs.get("done", False)
+                remaining = obs.get("actions_remaining", 0)
+                if not done:
+                    fb = obs.get("feedback", "")
+                    fallback_messages.append({"role": "user", "content": f"Result: {fb}\nIssues fixed: {obs.get('issues_fixed',0)}/{obs.get('total_issues',0)}. Actions remaining: {remaining}. Next command?"})
+                if len(fallback_messages) > 30:
+                    fallback_messages = [fallback_messages[0]] + fallback_messages[-28:]
+            results[task_id] = obs.get("current_score", 0.0)
+            print(f"  Final score for {task_id}: {results[task_id]:.4f}")
+            continue
 
         print(f"  Plan has {len(plan)} actions.")
 

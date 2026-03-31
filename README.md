@@ -85,15 +85,13 @@ Grading is **validation-based** (not exact match):
 pip install openenv-core fastapi uvicorn requests openai
 
 # Run the server
-cd data_clean_env
 uvicorn server.app:app --host 0.0.0.0 --port 8000 --reload
 ```
 
 ### Docker
 
 ```bash
-cd data_clean_env
-docker build -t data-clean-env:latest -f server/Dockerfile .
+docker build -t data-clean-env:latest .
 docker run -d -p 8000:8000 data-clean-env:latest
 ```
 
@@ -114,9 +112,12 @@ python inference.py
 |----------|--------|-------------|
 | `/health` | GET | Health check |
 | `/reset` | POST | Start new episode: `{"task_id": "customer_contacts"}` |
-| `/step` | POST | Execute action: `{"command": "inspect(\"email\")"}` |
+| `/step` | POST | Execute action: `{"action": {"command": "inspect(\"email\")"}}` |
 | `/state` | GET | Get current environment state |
 | `/docs` | GET | OpenAPI documentation |
+| `/web/` | GET | Interactive Gradio web UI |
+| `/ws` | WS | WebSocket for stateful agent sessions |
+| `/mcp` | POST/WS | MCP tool support for compatible agents |
 
 ## Baseline Scores
 
@@ -127,6 +128,7 @@ Scores vary by model capability. Expected ranges:
 | customer_contacts (easy) | 0.3–0.5 | 0.7–1.0 |
 | sales_records (medium) | 0.1–0.3 | 0.4–0.7 |
 | employee_records (hard) | 0.0–0.1 | 0.1–0.4 |
+| financial_transactions (expert) | 0.0–0.1 | 0.1–0.3 |
 
 ## Technical Details
 

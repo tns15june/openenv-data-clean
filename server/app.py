@@ -2,14 +2,15 @@
 FastAPI application for the DataClean Environment.
 
 Uses the OpenEnv framework's create_app() for full feature support
-(WebSocket, Web UI, MCP, OpenAPI docs) while patching in stateful
-HTTP endpoints for inference script compatibility.
+(WebSocket, Web UI, MCP, OpenAPI docs) while patching in session-isolated
+stateful HTTP endpoints for inference script compatibility.
 """
 
 import asyncio
 import os
+from uuid import uuid4
 
-from fastapi import FastAPI, Body
+from fastapi import FastAPI, Body, Header
 from pydantic import BaseModel
 from typing import Any, Dict, Optional
 
@@ -40,7 +41,7 @@ _framework_app = create_app(
 )
 
 # Remove the framework's stateless /reset, /step, /state HTTP routes
-# so we can replace them with stateful versions below.
+# so we can replace them with session-isolated stateful versions below.
 # This keeps WebSocket, web UI, MCP, /docs, /health, /metadata, /schema intact.
 _framework_app.router.routes = [
     r for r in _framework_app.router.routes
@@ -54,10 +55,27 @@ app = _framework_app
 
 
 # ---------------------------------------------------------------------------
-# Stateful HTTP layer — shared environment for inference script
+# Session-isolated stateful HTTP layer
+#
+# Each session gets its own DataCleanEnvironment instance. Sessions are
+# identified by the X-Session-Id header (or auto-assigned on /reset).
+# A default session ("default") is used when no header is provided,
+# so simple single-client usage (like inference.py) works out of the box.
 # ---------------------------------------------------------------------------
-_env = DataCleanEnvironment()
-_env_lock = asyncio.Lock()
+_sessions: Dict[str, DataCleanEnvironment] = {}
+_sessions_lock = asyncio.Lock()
+
+MAX_SESSIONS = 50
+
+
+async def _get_or_create_session(session_id: str) -> DataCleanEnvironment:
+    async with _sessions_lock:
+        if session_id not in _sessions:
+            if len(_sessions) >= MAX_SESSIONS:
+                oldest = next(iter(_sessions))
+                del _sessions[oldest]
+            _sessions[session_id] = DataCleanEnvironment()
+        return _sessions[session_id]
 
 
 class ResetRequest(BaseModel):
@@ -77,30 +95,42 @@ def _obs_dict(obs: DataCleanObservation) -> dict:
 
 
 @app.post("/reset", tags=["Environment Control"])
-async def stateful_reset(request: ResetRequest = Body(default_factory=ResetRequest)):
-    """Reset the environment with a specific task. State persists across requests."""
-    async with _env_lock:
-        obs = _env.reset(
-            seed=request.seed,
-            episode_id=request.episode_id,
-            task_id=request.task_id,
-        )
+async def stateful_reset(
+    request: ResetRequest = Body(default_factory=ResetRequest),
+    x_session_id: Optional[str] = Header(default="default"),
+):
+    """Reset the environment with a specific task. Session-isolated via X-Session-Id header."""
+    session_id = x_session_id or "default"
+    env = await _get_or_create_session(session_id)
+    obs = env.reset(
+        seed=request.seed,
+        episode_id=request.episode_id,
+        task_id=request.task_id,
+    )
     return {"observation": _obs_dict(obs), "reward": None, "done": False}
 
 
 @app.post("/step", tags=["Environment Control"])
-async def stateful_step(request: StepRequest):
-    """Execute an action in the environment. State persists across requests."""
+async def stateful_step(
+    request: StepRequest,
+    x_session_id: Optional[str] = Header(default="default"),
+):
+    """Execute an action. Session-isolated via X-Session-Id header."""
+    session_id = x_session_id or "default"
+    env = await _get_or_create_session(session_id)
     action = DataCleanAction(**request.action)
-    async with _env_lock:
-        obs = _env.step(action)
+    obs = env.step(action)
     return {"observation": _obs_dict(obs), "reward": obs.reward, "done": obs.done}
 
 
 @app.get("/state", tags=["State Management"])
-async def stateful_state():
-    """Get current environment state."""
-    return _env.state.model_dump()
+async def stateful_state(
+    x_session_id: Optional[str] = Header(default="default"),
+):
+    """Get current environment state for a session."""
+    session_id = x_session_id or "default"
+    env = await _get_or_create_session(session_id)
+    return env.state.model_dump()
 
 
 # ---------------------------------------------------------------------------
