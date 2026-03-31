@@ -1,6 +1,12 @@
 spec_version: 1
 name: data_clean_env
+version: "0.1.0"
 type: space
 runtime: fastapi
 app: server.app:app
 port: 8000
+description: >
+  Train and evaluate AI agents on real-world data quality analysis and cleaning.
+  Agents learn to identify and fix invalid formats, missing values, duplicates,
+  outliers, referential integrity violations, temporal inconsistencies, and
+  cross-column validation errors across 4 difficulty levels (easy to expert).

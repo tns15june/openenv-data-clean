@@ -24,6 +24,7 @@ RUN useradd -m -u 1000 user && chown -R user:user /app
 USER user
 
 ENV PYTHONPATH="/app"
+ENV ENABLE_WEB_INTERFACE="true"
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" || exit 1

@@ -120,4 +120,5 @@ VALIDATORS = {
     "score_out_of_range": lambda val, low=0, high=10, **_: validate_in_range(
         val, low, high
     ),
+    "cross_column_violation": None,  # Handled separately with multi-column logic
 }

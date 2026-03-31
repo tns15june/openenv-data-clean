@@ -16,85 +16,78 @@ import os
 import re
 import sys
 import textwrap
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from openai import OpenAI
+import requests
 
 # ---------------------------------------------------------------------------
-# Config from environment
+# Config
 # ---------------------------------------------------------------------------
 API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
 API_KEY = os.getenv("HF_TOKEN") or os.getenv("API_KEY", "")
 MODEL_NAME = os.getenv("MODEL_NAME", "")
 ENV_URL = os.getenv("ENV_URL", "http://localhost:8000")
 
-TEMPERATURE = 0.0
-MAX_TOKENS = 300
-
-TASKS = ["customer_contacts", "sales_records", "employee_records"]
+TASKS = ["customer_contacts", "sales_records", "employee_records", "financial_transactions"]
 
 # ---------------------------------------------------------------------------
-# System prompt
+# System prompt — Plan-Then-Execute strategy
 # ---------------------------------------------------------------------------
-SYSTEM_PROMPT = textwrap.dedent("""\
-    You are an expert data quality analyst. You are given a dataset with known issues.
-    Your job is to find and fix ALL data quality problems efficiently.
+PLANNING_PROMPT = textwrap.dedent("""\
+    You are an expert data quality analyst. You will be given:
+    1. A dataset with known quality issues
+    2. Inspection results for every column
+    3. Validation rules
 
-    Available commands (respond with EXACTLY ONE command per turn, no explanation):
-      inspect("column_name")                — View column statistics and issues
-      fix(row_index, "column_name", "value") — Fix a specific cell value
-      delete(row_index)                      — Remove a duplicate/invalid row
-      submit()                               — Finalize and get your score
+    Your job: Analyze ALL the data and produce a COMPLETE fix plan as a JSON array.
 
-    STRATEGY (follow this order strictly):
-    1. You will first receive inspection results for all columns — read them carefully
-    2. Look at the data table and identify ALL issues based on the inspection hints
-    3. Fix ALL issues using fix() commands, one at a time
-    4. Delete duplicate rows LAST (after all fixes), from highest row index to lowest
-       (this avoids row index shifting problems)
-    5. Only call submit() when you believe ALL issues are fixed
+    OUTPUT FORMAT — respond with ONLY a JSON array, no other text:
+    [
+      {"action": "fix", "row": 3, "column": "email", "value": "alice@mail.com"},
+      {"action": "fix", "row": 7, "column": "phone", "value": "555-012-3408"},
+      {"action": "delete", "row": 14},
+      ...
+    ]
 
-    VALIDATION RULES:
-    - Emails: must match user@domain.tld (no [at], no @@, no spaces)
-    - Phone numbers: digits, dashes, parens, spaces only; at least 10 digits
-    - Dates: YYYY-MM-DD format (e.g., 2024-03-25), must be valid calendar date
-    - Empty/missing values: provide a reasonable non-empty value matching context
-    - Negative numbers (quantity/price): make them positive (use absolute value)
-    - Price/salary outliers: fix to a reasonable value within the stated range
-    - Inconsistent region/department names: use the EXACT canonical form from the task description
-    - Excess whitespace: trim leading/trailing spaces, collapse double spaces to single
-    - Manager IDs: must reference an existing employee emp_id in the dataset
-    - Performance scores: must be within 0.0-10.0
-    - Salaries: must be within $20,000-$500,000
-    - Termination dates: must be AFTER hire date, or leave empty if employee is active
-    - Duplicate rows: rows that are exact or near-exact copies — delete the LATER one
+    RULES:
+    - Emails: user@domain.tld format (no [at], no @@, no spaces)
+    - Phone numbers: digits and dashes only, at least 10 digits
+    - Dates: YYYY-MM-DD format, must be valid calendar date
+    - Empty/missing values: provide a reasonable value matching the column context
+    - Negative numbers: make them positive (absolute value)
+    - Outliers: fix to a reasonable value within the stated range
+    - Inconsistent names/categories: use the EXACT canonical form from the task description
+    - Excess whitespace: trim and collapse double spaces
+    - Currency codes: use ISO format (USD, EUR, GBP, JPY, CAD)
+    - Manager/reviewer IDs: must reference an existing valid ID
+    - Performance scores: within 0.0-10.0
+    - Salaries: within $20,000-$500,000
+    - Termination dates: must be after hire date, or empty if active
+    - Approved/flagged transactions: must have a reviewer_id
+    - Duplicates: use "delete" action on the LATER duplicate row
 
-    IMPORTANT: After deleting a row, all subsequent row indices shift down by 1.
-    Always delete from highest index to lowest to avoid this issue.
+    CRITICAL — DELETION ORDER:
+    List ALL fix actions first, then ALL delete actions.
+    Delete rows from HIGHEST index to LOWEST (to avoid index shifting).
 
-    Respond with ONLY the command. No explanation, no markdown, no extra text.
+    IMPORTANT: Only fix cells that actually have issues. Do NOT touch correct data.
+    Be conservative — a wrong fix costs -0.05 penalty.
+
+    Respond with ONLY the JSON array. No explanation, no markdown fences, no other text.
 """)
 
 
 # ---------------------------------------------------------------------------
-# HTTP helpers (direct REST calls to the environment server)
+# HTTP helpers
 # ---------------------------------------------------------------------------
-import requests
-
-
 def env_reset(task_id: str) -> Dict[str, Any]:
-    """Reset the environment with a specific task."""
-    resp = requests.post(
-        f"{ENV_URL}/reset",
-        json={"task_id": task_id},
-        timeout=30,
-    )
+    resp = requests.post(f"{ENV_URL}/reset", json={"task_id": task_id}, timeout=30)
     resp.raise_for_status()
     return resp.json()
 
 
 def env_step(command: str) -> Dict[str, Any]:
-    """Execute a command in the environment."""
     resp = requests.post(
         f"{ENV_URL}/step",
         json={"action": {"command": command}},
@@ -105,55 +98,62 @@ def env_step(command: str) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Observation formatting
+# JSON plan extraction
 # ---------------------------------------------------------------------------
-def format_observation(obs: Dict[str, Any], step_num: int) -> str:
-    """Format an observation dict as a user message for the LLM."""
-    parts = []
-    parts.append(f"Step {step_num} | Task: {obs.get('task_id', '?')} ({obs.get('difficulty', '?')})")
-    parts.append(f"Issues fixed: {obs.get('issues_fixed', 0)}/{obs.get('total_issues', 0)} | Score: {obs.get('current_score', 0.0):.4f}")
-    parts.append(f"Actions remaining: {obs.get('actions_remaining', 0)}")
-    parts.append("")
+def extract_json_plan(text: str) -> Optional[List[Dict]]:
+    """Extract a JSON array from LLM response, handling markdown fences."""
+    if not text:
+        return None
+    # Strip markdown code fences
+    text = re.sub(r"^```(?:json)?\s*\n?", "", text.strip())
+    text = re.sub(r"\n?```\s*$", "", text.strip())
+    try:
+        plan = json.loads(text)
+        if isinstance(plan, list):
+            return plan
+    except json.JSONDecodeError:
+        pass
+    # Try to find JSON array in the text
+    match = re.search(r"\[[\s\S]*\]", text)
+    if match:
+        try:
+            plan = json.loads(match.group())
+            if isinstance(plan, list):
+                return plan
+        except json.JSONDecodeError:
+            pass
+    return None
 
-    feedback = obs.get("feedback", "")
-    if feedback:
-        parts.append(f"Last action result: {feedback}")
-        parts.append("")
 
-    parts.append("Task description:")
-    parts.append(obs.get("task_description", ""))
-    parts.append("")
-
-    parts.append("Column info:")
-    parts.append(obs.get("column_info", ""))
-    parts.append("")
-
-    parts.append("Current data:")
-    parts.append(obs.get("data_preview", ""))
-
-    return "\n".join(parts)
+def plan_to_command(action: Dict) -> Optional[str]:
+    """Convert a plan action dict to an environment command string."""
+    act_type = action.get("action", "")
+    if act_type == "fix":
+        row = action.get("row", 0)
+        col = action.get("column", "")
+        val = action.get("value", "")
+        return f'fix({row}, "{col}", "{val}")'
+    elif act_type == "delete":
+        row = action.get("row", 0)
+        return f"delete({row})"
+    return None
 
 
 # ---------------------------------------------------------------------------
-# Action extraction
+# Fallback: single-action extraction for error recovery
 # ---------------------------------------------------------------------------
 ACTION_RE = re.compile(r"(inspect|fix|delete|submit)\s*\(", re.IGNORECASE)
 
 
 def extract_action(response_text: str) -> str:
-    """Extract a valid action from the LLM response."""
     if not response_text:
         return "submit()"
-
-    # Try each line
     for line in response_text.strip().splitlines():
         line = line.strip()
         if not line:
             continue
-        # Strip markdown code fences
         line = re.sub(r"^```\w*\s*", "", line)
         line = re.sub(r"\s*```$", "", line)
-        # Strip "action:" prefix
         line = re.sub(r"^(?:action|next action)\s*[:\-]\s*", "", line, flags=re.IGNORECASE)
         if ACTION_RE.search(line):
             m = ACTION_RE.search(line)
@@ -167,12 +167,31 @@ def extract_action(response_text: str) -> str:
                     if depth == 0:
                         return line[start : i + 1]
             return line[start:] + ")"
-
     return "submit()"
 
 
 # ---------------------------------------------------------------------------
-# Main
+# Format observation for LLM context
+# ---------------------------------------------------------------------------
+def format_observation(obs: Dict[str, Any]) -> str:
+    parts = [
+        f"Task: {obs.get('task_id', '?')} ({obs.get('difficulty', '?')})",
+        f"Total issues: {obs.get('total_issues', 0)}",
+        "",
+        "Task description:",
+        obs.get("task_description", ""),
+        "",
+        "Column info:",
+        obs.get("column_info", ""),
+        "",
+        "Current data:",
+        obs.get("data_preview", ""),
+    ]
+    return "\n".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Main — Plan-Then-Execute
 # ---------------------------------------------------------------------------
 def main() -> None:
     client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
@@ -188,7 +207,12 @@ def main() -> None:
             obs = obs["observation"]
 
         done = obs.get("done", False)
-        messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+        if done:
+            results[task_id] = obs.get("current_score", 0.0)
+            continue
+
+        total_issues = obs.get("total_issues", 0)
+        max_steps = obs.get("actions_remaining", 0)
 
         # --- Phase 1: Auto-inspect all columns ---
         columns = []
@@ -201,76 +225,107 @@ def main() -> None:
                     columns.append(col_name)
 
         inspection_results = []
-        step_num = 0
+        step_count = 0
         for col in columns:
             if done:
                 break
-            step_num += 1
+            step_count += 1
             cmd = f'inspect("{col}")'
-            print(f"  Step {step_num}: {cmd}")
+            print(f"  Step {step_count}: {cmd}")
             obs = env_step(cmd)
             if "observation" in obs:
                 obs = obs["observation"]
             done = obs.get("done", False)
-            feedback = obs.get("feedback", "")
-            inspection_results.append(f"[{col}]: {feedback}")
+            inspection_results.append(obs.get("feedback", ""))
 
         if done:
-            score = obs.get("current_score", 0.0)
-            print(f"  Done during inspection! Score: {score:.4f}")
-            results[task_id] = score
+            results[task_id] = obs.get("current_score", 0.0)
+            print(f"  Done during inspection. Score: {results[task_id]:.4f}")
             continue
 
-        # Build a summary of all inspections for the LLM
-        inspection_summary = "\n\n".join(inspection_results)
-        initial_context = format_observation(obs, step_num)
-        initial_context += f"\n\n--- INSPECTION SUMMARY (all columns) ---\n{inspection_summary}"
-        initial_context += "\n\n--- NOW FIX ALL ISSUES. Do fixes first, then deletions (highest index first). ---"
+        # --- Phase 2: Ask LLM to plan ALL fixes in ONE call ---
+        context = format_observation(obs)
+        inspection_text = "\n\n".join(
+            f"[Column: {col}]\n{result}"
+            for col, result in zip(columns, inspection_results)
+        )
 
-        messages.append({"role": "user", "content": initial_context})
+        planning_message = (
+            f"{context}\n\n"
+            f"--- INSPECTION RESULTS ---\n{inspection_text}\n\n"
+            f"--- PLAN YOUR FIXES ---\n"
+            f"Remaining steps: {obs.get('actions_remaining', 0)} (includes submit).\n"
+            f"Total issues to fix: {total_issues}.\n"
+            f"Output ONLY a JSON array of fix/delete actions."
+        )
 
-        # --- Phase 2: LLM-driven fixes ---
-        while not done:
-            step_num += 1
+        print(f"  Calling LLM for fix plan...")
+        try:
+            completion = client.chat.completions.create(
+                model=MODEL_NAME,
+                messages=[
+                    {"role": "system", "content": PLANNING_PROMPT},
+                    {"role": "user", "content": planning_message},
+                ],
+                temperature=0.0,
+                max_tokens=2000,
+                stream=False,
+            )
+            plan_text = completion.choices[0].message.content or ""
+        except Exception as exc:
+            print(f"  LLM error: {exc}. Submitting.")
+            env_step("submit()")
+            obs_final = env_step("submit()")
+            if "observation" in obs_final:
+                obs_final = obs_final["observation"]
+            results[task_id] = obs_final.get("current_score", 0.0)
+            continue
 
-            # Keep conversation manageable — but preserve system + initial context
-            if len(messages) > 40:
-                messages = [messages[0], messages[1]] + messages[-36:]
+        plan = extract_json_plan(plan_text)
+        if not plan:
+            print(f"  Failed to parse plan. Raw: {plan_text[:200]}...")
+            # Fallback: try single action extraction loop
+            plan = []
 
-            try:
-                completion = client.chat.completions.create(
-                    model=MODEL_NAME,
-                    messages=messages,
-                    temperature=TEMPERATURE,
-                    max_tokens=MAX_TOKENS,
-                    stream=False,
-                )
-                response_text = completion.choices[0].message.content or ""
-            except Exception as exc:
-                print(f"  LLM error: {exc}. Using submit().")
-                response_text = "submit()"
+        print(f"  Plan has {len(plan)} actions.")
 
-            action = extract_action(response_text)
-            messages.append({"role": "assistant", "content": action})
-            print(f"  Step {step_num}: {action}")
+        # --- Phase 3: Execute plan ---
+        remaining = obs.get("actions_remaining", 0)
+        for i, action_item in enumerate(plan):
+            if done or remaining <= 1:  # Save 1 step for submit
+                break
 
-            obs = env_step(action)
+            cmd = plan_to_command(action_item)
+            if not cmd:
+                continue
+
+            step_count += 1
+            remaining -= 1
+            print(f"  Step {step_count}: {cmd}")
+            obs = env_step(cmd)
+            if "observation" in obs:
+                obs = obs["observation"]
+            done = obs.get("done", False)
+            remaining = obs.get("actions_remaining", 0)
+
+            feedback = obs.get("feedback", "")
+            if "not yet resolved" in feedback.lower() and not done:
+                # Fix didn't work — we'll continue with the plan, no retry to save steps
+                print(f"    Warning: {feedback[:80]}")
+
+        # --- Phase 4: Submit ---
+        if not done:
+            step_count += 1
+            print(f"  Step {step_count}: submit()")
+            obs = env_step("submit()")
             if "observation" in obs:
                 obs = obs["observation"]
 
-            done = obs.get("done", False)
-            score = obs.get("current_score", 0.0)
+        score = obs.get("current_score", 0.0)
+        results[task_id] = score
+        print(f"  Final score for {task_id}: {score:.4f}")
 
-            if done:
-                print(f"  Done! Score: {score:.4f}")
-                results[task_id] = score
-            else:
-                # Send updated observation as next user message
-                user_msg = format_observation(obs, step_num)
-                messages.append({"role": "user", "content": user_msg})
-
-        print(f"  Final score for {task_id}: {results.get(task_id, 0.0):.4f}")
-
+    # --- Results Summary ---
     print(f"\n{'=' * 60}")
     print("RESULTS SUMMARY")
     print(f"{'=' * 60}")

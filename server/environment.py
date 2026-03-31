@@ -380,7 +380,6 @@ class DataCleanEnvironment(Environment):
             return self._find_current_row(issue.row) is None
 
         if issue.issue_type == "temporal_inconsistency":
-            # Find the row by original index
             current_row_idx = self._find_current_row(issue.row)
             if current_row_idx is None:
                 return False
@@ -388,6 +387,17 @@ class DataCleanEnvironment(Environment):
             hire = str(row.get("hire_date", ""))
             term = str(row.get("termination_date", ""))
             return validate_temporal_order(hire, term)
+
+        if issue.issue_type == "cross_column_violation":
+            current_row_idx = self._find_current_row(issue.row)
+            if current_row_idx is None:
+                return False
+            row = self._current_data[current_row_idx]
+            status = str(row.get("status", "")).strip().lower()
+            reviewer = str(row.get("reviewer_id", "")).strip()
+            if status in ("approved", "flagged"):
+                return reviewer != "" and reviewer.lower() not in ("none", "null", "")
+            return True
 
         # Standard validation
         validator = VALIDATORS.get(issue.issue_type)

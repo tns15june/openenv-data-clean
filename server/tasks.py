@@ -297,12 +297,123 @@ HARD_TASK = TaskDefinition(
 
 
 # ---------------------------------------------------------------------------
+# Expert task — Financial Transactions
+# ---------------------------------------------------------------------------
+_VALID_CATEGORIES: Set[str] = {"Payment", "Refund", "Transfer", "Fee", "Deposit", "Withdrawal"}
+_VALID_CURRENCIES: Set[str] = {"USD", "EUR", "GBP", "JPY", "CAD"}
+_VALID_STATUSES: Set[str] = {"pending", "approved", "rejected", "flagged"}
+
+_EXPERT_DATA: List[Dict[str, Any]] = [
+    {"txn_id": "TXN-1001", "account_id": "ACC-201", "counterparty": "Acme Corp", "amount": 1500.00, "currency": "USD", "txn_date": "2025-01-15", "category": "Payment", "description": "Invoice #4521 payment", "status": "approved", "reviewer_id": "REV-01"},
+    {"txn_id": "TXN-1002", "account_id": "ACC-202", "counterparty": "Global Trade Ltd", "amount": -2300.50, "currency": "EUR", "txn_date": "2025-01-16", "category": "Payment", "description": "Quarterly subscription", "status": "approved", "reviewer_id": "REV-02"},
+    {"txn_id": "TXN-1003", "account_id": "ACC-203", "counterparty": "Smith & Jones", "amount": 750.00, "currency": "USD", "txn_date": "2025-01-18", "category": "Refund", "description": "Overcharge correction", "status": "approved", "reviewer_id": "REV-01"},
+    {"txn_id": "TXN-1004", "account_id": "ACC-204", "counterparty": "TechStart Inc", "amount": 4200.00, "currency": "usd", "txn_date": "2025-01-20", "category": "Payment", "description": "Software license renewal", "status": "approved", "reviewer_id": "REV-03"},
+    {"txn_id": "TXN-1005", "account_id": "ACC-205", "counterparty": "DataFlow Systems", "amount": 890.00, "currency": "USD", "txn_date": "01/22/2025", "category": "Payment", "description": "Cloud hosting Jan 2025", "status": "approved", "reviewer_id": "REV-02"},
+    {"txn_id": "TXN-1006", "account_id": "ACC-206", "counterparty": "  Mercury Partners  ", "amount": 3100.00, "currency": "USD", "txn_date": "2025-01-23", "category": "Transfer", "description": "Intercompany transfer Q1", "status": "approved", "reviewer_id": "REV-01"},
+    {"txn_id": "TXN-1007", "account_id": "ACC-207", "counterparty": "Zenith Solutions", "amount": 5600.00, "currency": "GBP", "txn_date": "2025-01-25", "category": "Payment", "description": "Consulting fees Jan", "status": "approved", "reviewer_id": "REV-03"},
+    {"txn_id": "TXN-1008", "account_id": "ACC-208", "counterparty": "Alpha Industries", "amount": 1200.00, "currency": "USD", "txn_date": "2025-01-27", "category": "Pymnt", "description": "Office supplies order", "status": "approved", "reviewer_id": "REV-01"},
+    {"txn_id": "", "account_id": "ACC-209", "counterparty": "Beta Services", "amount": 980.00, "currency": "USD", "txn_date": "2025-01-28", "category": "Payment", "description": "Maintenance contract", "status": "approved", "reviewer_id": "REV-02"},
+    {"txn_id": "TXN-1010", "account_id": "ACC-210", "counterparty": "Omega Group", "amount": 15000.00, "currency": "EUR", "txn_date": "2025-01-30", "category": "Payment", "description": "Annual license fee", "status": "approved", "reviewer_id": ""},
+    {"txn_id": "TXN-1011", "account_id": "ACC-211", "counterparty": "Delta Corp", "amount": 2450.00, "currency": "USD", "txn_date": "2025-02-01", "category": "Payment", "description": "Marketing materials", "status": "pending", "reviewer_id": ""},
+    {"txn_id": "TXN-1012", "account_id": "ACC-212", "counterparty": "Pinnacle Tech", "amount": 670.00, "currency": "JPY", "txn_date": "2025-02-03", "category": "Fee", "description": "Processing fee Q1", "status": "approved", "reviewer_id": "REV-01"},
+    {"txn_id": "TXN-1013", "account_id": "ACC-213", "counterparty": "Summit Holdings", "amount": 99999.99, "currency": "USD", "txn_date": "2025-02-05", "category": "Payment", "description": "Large equipment purchase", "status": "flagged", "reviewer_id": "REV-03"},
+    {"txn_id": "TXN-1014", "account_id": "ACC-214", "counterparty": "Crest Financial", "amount": 3400.00, "currency": "CAD", "txn_date": "2025-02-07", "category": "Transfer", "description": "Cross-border wire", "status": "approved", "reviewer_id": "REV-02"},
+    {"txn_id": "TXN-1015", "account_id": "ACC-215", "counterparty": "Nova Analytics", "amount": 1850.00, "currency": "USD", "txn_date": "2025-02-10", "category": "Payment", "description": "Data analytics subscription", "status": "approved", "reviewer_id": "REV-01"},
+    {"txn_id": "TXN-1016", "account_id": "ACC-216", "counterparty": "Echo Ventures", "amount": 4700.00, "currency": "Dollars", "txn_date": "2025-02-12", "category": "Payment", "description": "Investment advisory fee", "status": "approved", "reviewer_id": "REV-03"},
+    {"txn_id": "TXN-1017", "account_id": "ACC-217", "counterparty": "Vortex Labs", "amount": 560.00, "currency": "USD", "txn_date": "2025-13-14", "category": "Fee", "description": "Lab testing fee", "status": "approved", "reviewer_id": "REV-02"},
+    {"txn_id": "TXN-1018", "account_id": "ACC-218", "counterparty": "Horizon Media", "amount": 2100.00, "currency": "USD", "txn_date": "2025-02-16", "category": "Payment", "description": "Ad campaign Feb", "status": "approved", "reviewer_id": "REV-01"},
+    {"txn_id": "TXN-1019", "account_id": "ACC-219", "counterparty": "Titan Logistics", "amount": -450.00, "currency": "EUR", "txn_date": "2025-02-18", "category": "Refund", "description": "Shipping overcharge refund", "status": "approved", "reviewer_id": "REV-03"},
+    {"txn_id": "TXN-1020", "account_id": "ACC-220", "counterparty": "Quantum Research", "amount": 8200.00, "currency": "USD", "txn_date": "2025-02-20", "category": "Payment", "description": "R&D collaboration Q1", "status": "rejected", "reviewer_id": "REV-02"},
+    {"txn_id": "TXN-1021", "account_id": "ACC-221", "counterparty": "Flux Energy", "amount": 1350.00, "currency": "USD", "txn_date": "2025-02-22", "category": "Payment", "description": "Utility bill Feb", "status": "approved", "reviewer_id": "REV-01"},
+    {"txn_id": "TXN-1022", "account_id": "ACC-222", "counterparty": "Apex Consulting", "amount": 6300.00, "currency": "GBP", "txn_date": "2025-02-24", "category": "Payment", "description": "Strategy consulting", "status": "approved", "reviewer_id": "REV-03"},
+    {"txn_id": "TXN-1023", "account_id": "ACC-223", "counterparty": "Nexus Partners", "amount": 2750.00, "currency": "USD", "txn_date": "2025-02-26", "category": "Transfer", "description": "Partner distribution Q1", "status": "approved", "reviewer_id": "REV-02"},
+    {"txn_id": "TXN-1024", "account_id": "ACC-224", "counterparty": "Stellar Dynamics", "amount": 1100.00, "currency": "USD", "txn_date": "2025-02-28", "category": "Payment", "description": "Equipment maintenance", "status": "approved", "reviewer_id": "REV-01"},
+    {"txn_id": "TXN-1025", "account_id": "ACC-225", "counterparty": "Cobalt Security", "amount": 4500.00, "currency": "EUR", "txn_date": "2025-03-02", "category": "Payment", "description": "Security audit Q1", "status": "approved", "reviewer_id": "REV-03"},
+    {"txn_id": "TXN-1026", "account_id": "ACC-226", "counterparty": "Prism Analytics", "amount": 1750.00, "currency": "USD", "txn_date": "2025-03-04", "category": "Payment", "description": "BI dashboard license", "status": "approved", "reviewer_id": "REV-02"},
+    {"txn_id": "TXN-1027", "account_id": "ACC-201", "counterparty": "Acme Corp", "amount": 1500.00, "currency": "USD", "txn_date": "2025-01-15", "category": "Payment", "description": "Invoice #4521 payment", "status": "approved", "reviewer_id": "REV-01"},
+    {"txn_id": "TXN-1028", "account_id": "ACC-228", "counterparty": "Iron  Bridge  Capital", "amount": 9200.00, "currency": "USD", "txn_date": "2025-03-08", "category": "Deposit", "description": "Capital injection", "status": "approved", "reviewer_id": "REV-01"},
+    {"txn_id": "TXN-1029", "account_id": "ACC-229", "counterparty": "Pulse Health", "amount": 3800.00, "currency": "USD", "txn_date": "2025-03-10", "category": "Payment", "description": "Employee wellness program", "status": "approved", "reviewer_id": "REV-03"},
+    {"txn_id": "TXN-1030", "account_id": "ACC-230", "counterparty": "Atlas Freight", "amount": 2200.00, "currency": "US$", "txn_date": "2025-03-12", "category": "Payment", "description": "Freight charges March", "status": "approved", "reviewer_id": "REV-02"},
+    {"txn_id": "TXN-1031", "account_id": "ACC-231", "counterparty": "Vertex Design", "amount": 1600.00, "currency": "USD", "txn_date": "2025-03-14", "category": "Payment", "description": "UI/UX redesign phase 1", "status": "approved", "reviewer_id": "REV-01"},
+    {"txn_id": "TXN-1032", "account_id": "ACC-232", "counterparty": "Nimbus Cloud", "amount": 5100.00, "currency": "USD", "txn_date": "2025-03-16", "category": "Payment", "description": "Cloud infra March", "status": "approved", "reviewer_id": "REV-03"},
+    {"txn_id": "TXN-1033", "account_id": "ACC-233", "counterparty": "Helix Bio", "amount": 7400.00, "currency": "EUR", "txn_date": "2025-03-18", "category": "Payment", "description": "Lab supplies Q1", "status": "flagged", "reviewer_id": ""},
+    {"txn_id": "TXN-1034", "account_id": "ACC-234", "counterparty": "Onyx Legal", "amount": 3950.00, "currency": "USD", "txn_date": "2025-03-20", "category": "Fee", "description": "Legal retainer March", "status": "approved", "reviewer_id": "REV-02"},
+    {"txn_id": "TXN-1035", "account_id": "ACC-235", "counterparty": "Zephyr Travel", "amount": 2800.00, "currency": "USD", "txn_date": "2025-03-22", "category": "Payment", "description": "Corporate travel Q1", "status": "approved", "reviewer_id": "REV-01"},
+    {"txn_id": "TXN-1036", "account_id": "ACC-236", "counterparty": "Ruby Software", "amount": 4100.00, "currency": "USD", "txn_date": "2025-03-24", "category": "Payment", "description": "SaaS licenses March", "status": "approved", "reviewer_id": "REV-03"},
+    {"txn_id": "TXN-1037", "account_id": "ACC-237", "counterparty": "Cascade Investments", "amount": 12500.00, "currency": "GBP", "txn_date": "2025-03-26", "category": "Withdrawal", "description": "Dividend distribution", "status": "approved", "reviewer_id": "REV-02"},
+    {"txn_id": "TXN-1038", "account_id": "ACC-238", "counterparty": "Lunar Tech", "amount": 890.00, "currency": "USD", "txn_date": "2025-03-28", "category": "Fee", "description": "API usage fee March", "status": "approved", "reviewer_id": "REV-01"},
+    {"txn_id": "TXN-1039", "account_id": "ACC-239", "counterparty": "Sapphire HR", "amount": 5500.00, "currency": "USD", "txn_date": "2025-03-30", "category": "Payment", "description": "Recruitment services Q1", "status": "approved", "reviewer_id": "REV-03"},
+    {"txn_id": "TXN-1040", "account_id": "ACC-240", "counterparty": "Ember Creative", "amount": 3200.00, "currency": "USD", "txn_date": "2025-04-01", "category": "Payment", "description": "Brand refresh project", "status": "approved", "reviewer_id": "REV-02"},
+]
+
+_VALID_REVIEWER_IDS: Set[str] = {"REV-01", "REV-02", "REV-03"}
+
+_EXPERT_ISSUES: List[Issue] = [
+    # Negative amounts
+    Issue("X1", 1, "amount", "negative_number", "Negative payment amount", {}),
+    Issue("X2", 18, "amount", "negative_number", "Negative refund amount (refunds should be positive)", {}),
+    # Currency format issues
+    Issue("X3", 3, "currency", "inconsistent_format", "Lowercase currency code", {"canonical_set": _VALID_CURRENCIES}),
+    Issue("X4", 15, "currency", "inconsistent_format", "Non-standard currency format 'Dollars'", {"canonical_set": _VALID_CURRENCIES}),
+    Issue("X5", 29, "currency", "inconsistent_format", "Non-standard currency format 'US$'", {"canonical_set": _VALID_CURRENCIES}),
+    # Wrong date formats
+    Issue("X6", 4, "txn_date", "wrong_date_format", "Date in MM/DD/YYYY format", {}),
+    Issue("X7", 16, "txn_date", "invalid_date", "Invalid date (month 13)", {}),
+    # Missing values
+    Issue("X8", 8, "txn_id", "missing_value", "Empty transaction ID", {}),
+    Issue("X9", 9, "reviewer_id", "cross_column_violation", "Approved status but missing reviewer_id", {}),
+    # Inconsistent category
+    Issue("X10", 7, "category", "inconsistent_format", "Abbreviated category 'Pymnt' instead of 'Payment'", {"canonical_set": _VALID_CATEGORIES}),
+    # Excess whitespace
+    Issue("X11", 5, "counterparty", "excess_whitespace", "Leading/trailing whitespace in counterparty", {}),
+    Issue("X12", 27, "counterparty", "excess_whitespace", "Double spaces in counterparty name", {}),
+    # Duplicate row
+    Issue("X13", 26, "txn_id", "duplicate_row", "Exact duplicate of row 0 (TXN-1001)",
+          original_row_data={"txn_id": "TXN-1027", "account_id": "ACC-201", "counterparty": "Acme Corp", "amount": 1500.00, "currency": "USD", "txn_date": "2025-01-15", "category": "Payment", "description": "Invoice #4521 payment", "status": "approved", "reviewer_id": "REV-01"}),
+    # Cross-column: flagged but no reviewer
+    Issue("X14", 32, "reviewer_id", "cross_column_violation", "Flagged status but missing reviewer_id", {}),
+    # Outlier amount
+    Issue("X15", 12, "amount", "outlier", "Unusually large amount (possible error)", {"low": 0.01, "high": 50000.0}),
+]
+
+EXPERT_TASK = TaskDefinition(
+    task_id="financial_transactions",
+    difficulty="expert",
+    description=(
+        "You are auditing a financial transactions ledger for compliance review. "
+        "The data should have valid transaction IDs, positive amounts, ISO currency codes "
+        "(USD, EUR, GBP, JPY, CAD), dates in YYYY-MM-DD format, valid categories "
+        "(Payment, Refund, Transfer, Fee, Deposit, Withdrawal), and no duplicate entries. "
+        "Approved and flagged transactions must have a reviewer_id. "
+        "Fix all data quality issues to pass the audit."
+    ),
+    columns=["txn_id", "account_id", "counterparty", "amount", "currency", "txn_date", "category", "description", "status", "reviewer_id"],
+    data=_EXPERT_DATA,
+    issues=_EXPERT_ISSUES,
+    max_steps=45,
+    column_descriptions={
+        "txn_id": "Transaction ID (format: TXN-XXXX, must not be empty)",
+        "account_id": "Account ID (format: ACC-XXX)",
+        "counterparty": "Counterparty name (no excess whitespace)",
+        "amount": "Transaction amount (must be positive)",
+        "currency": "ISO currency code (must be: USD, EUR, GBP, JPY, or CAD)",
+        "txn_date": "Transaction date (must be valid YYYY-MM-DD)",
+        "category": "Transaction category (must be: Payment, Refund, Transfer, Fee, Deposit, or Withdrawal)",
+        "description": "Transaction description",
+        "status": "Status (pending, approved, rejected, flagged)",
+        "reviewer_id": "Reviewer ID (required for approved/flagged transactions)",
+    },
+)
+
+
+# ---------------------------------------------------------------------------
 # Task registry
 # ---------------------------------------------------------------------------
 ALL_TASKS: Dict[str, TaskDefinition] = {
     "customer_contacts": EASY_TASK,
     "sales_records": MEDIUM_TASK,
     "employee_records": HARD_TASK,
+    "financial_transactions": EXPERT_TASK,
 }
 
 
