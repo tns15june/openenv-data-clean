@@ -417,10 +417,256 @@ ALL_TASKS: Dict[str, TaskDefinition] = {
 }
 
 
-def get_task(task_id: str) -> TaskDefinition:
-    """Get a deep copy of a task definition."""
+def get_task(task_id: str, seed: int | None = None) -> TaskDefinition:
+    """Get a task definition. With seed, produces a randomized variant.
+
+    When seed is None, returns the original hardcoded task (deterministic).
+    When seed is provided, corrupts random clean rows to create variation
+    while keeping the same number of issues and validation rules.
+    """
     if task_id not in ALL_TASKS:
         raise ValueError(
             f"Unknown task_id '{task_id}'. Available: {list(ALL_TASKS.keys())}"
         )
-    return copy.deepcopy(ALL_TASKS[task_id])
+    base = copy.deepcopy(ALL_TASKS[task_id])
+    if seed is None:
+        return base
+    return _generate_seeded_task(base, seed)
+
+
+# ---------------------------------------------------------------------------
+# Seed-based procedural data variation
+# ---------------------------------------------------------------------------
+import random as _random_module
+
+
+def _corrupt_email(rng: _random_module.Random, value: str) -> str:
+    """Corrupt a valid email into an invalid one."""
+    corruptions = [
+        lambda v: v.replace("@", "[at]"),
+        lambda v: v.replace("@", "@@"),
+        lambda v: v.split("@")[0],  # missing domain
+        lambda v: v.replace(".", " ", 1),
+        lambda v: "  " + v + "  ",
+    ]
+    return rng.choice(corruptions)(value)
+
+
+def _corrupt_phone(rng: _random_module.Random, value: str) -> str:
+    """Inject letters into a phone number."""
+    chars = list(value)
+    positions = [i for i, c in enumerate(chars) if c.isdigit()]
+    if len(positions) >= 3:
+        for pos in rng.sample(positions, min(3, len(positions))):
+            chars[pos] = rng.choice("ABCDEFX")
+    return "".join(chars)
+
+
+def _corrupt_date(rng: _random_module.Random, value: str) -> tuple[str, str]:
+    """Corrupt a YYYY-MM-DD date. Returns (corrupted_value, issue_type)."""
+    corruptions = [
+        (lambda v: f"{v[5:7]}/{v[8:10]}/{v[:4]}", "wrong_date_format"),  # MM/DD/YYYY
+        (lambda v: v.replace("-", "/"), "wrong_date_format"),  # slashes
+        (lambda v: v[:5] + "13" + v[7:], "invalid_date"),  # month 13
+    ]
+    func, issue_type = rng.choice(corruptions)
+    return func(value), issue_type
+
+
+def _corrupt_whitespace(rng: _random_module.Random, value: str) -> str:
+    """Add excess whitespace to a string value."""
+    corruptions = [
+        lambda v: "  " + v + "  ",
+        lambda v: v.replace(" ", "  ", 1) if " " in v else "  " + v,
+        lambda v: v + "   ",
+    ]
+    return rng.choice(corruptions)(value)
+
+
+def _corrupt_canonical(rng: _random_module.Random, value: str, canonical_set: set) -> str:
+    """Produce a non-canonical variant of a valid value."""
+    corruptions = [
+        lambda v: v.lower(),
+        lambda v: v.upper(),
+        lambda v: v.replace(" ", "-").lower(),
+        lambda v: v[:3],  # abbreviation
+    ]
+    corrupted = rng.choice(corruptions)(value)
+    # Make sure it's actually different from all canonical values
+    if corrupted in canonical_set:
+        corrupted = corrupted + " (typo)"
+    return corrupted
+
+
+def _corrupt_number_negative(rng: _random_module.Random, value: float) -> float:
+    """Make a positive number negative."""
+    return -abs(value)
+
+
+def _corrupt_number_outlier(rng: _random_module.Random, value: float, low: float, high: float) -> float:
+    """Push a number outside the valid range."""
+    if rng.random() < 0.5:
+        return high * rng.uniform(10, 1000)  # way above
+    else:
+        return low * rng.uniform(-10, -0.1)  # way below or negative
+
+
+def _generate_seeded_task(base: TaskDefinition, seed: int) -> TaskDefinition:
+    """Generate a randomized variant of a task using a seed.
+
+    Strategy: For each issue in the base task, pick a different clean row
+    to corrupt (when possible) and apply the same type of corruption.
+    This keeps issue count and types identical but changes which rows
+    are affected and how they're corrupted.
+    """
+    rng = _random_module.Random(seed)
+
+    # Find which rows have issues in the base task
+    issue_rows = {issue.row for issue in base.issues}
+    clean_rows = [i for i in range(len(base.data)) if i not in issue_rows]
+
+    # Start with clean versions of all data
+    # First, build a "clean" dataset by reverting corrupted cells
+    # For simplicity, we'll reuse the base data but re-assign which rows get corrupted
+    data = copy.deepcopy(base.data)
+    new_issues: List[Issue] = []
+    issue_counter = 0
+
+    # Separate non-duplicate issues from duplicate issues
+    non_dup_issues = [i for i in base.issues if i.issue_type != "duplicate_row"]
+    dup_issues = [i for i in base.issues if i.issue_type == "duplicate_row"]
+
+    # For non-duplicate issues: try to assign to different rows
+    available_rows = list(range(len(data)))
+    rng.shuffle(available_rows)
+    used_rows: set = set()
+
+    for orig_issue in non_dup_issues:
+        issue_counter += 1
+        issue_id = f"S{seed}-{issue_counter}"
+        col = orig_issue.column
+        issue_type = orig_issue.issue_type
+
+        # Pick a target row (prefer one not already used)
+        candidates = [r for r in available_rows if r not in used_rows and r < len(data)]
+        if not candidates:
+            candidates = [r for r in range(len(data)) if r not in used_rows]
+        if not candidates:
+            # All rows used, just reuse the original
+            new_issues.append(Issue(
+                issue_id=issue_id, row=orig_issue.row, column=col,
+                issue_type=issue_type, description=orig_issue.description,
+                validation_params=copy.deepcopy(orig_issue.validation_params),
+            ))
+            continue
+
+        target_row = rng.choice(candidates)
+        used_rows.add(target_row)
+        original_value = data[target_row].get(col, "")
+
+        # Apply corruption based on issue type
+        description = orig_issue.description
+        params = copy.deepcopy(orig_issue.validation_params)
+
+        if issue_type == "invalid_email" and original_value:
+            if "@" in str(original_value):
+                data[target_row][col] = _corrupt_email(rng, str(original_value))
+                description = f"Email '{data[target_row][col]}' is invalid"
+            else:
+                target_row = orig_issue.row  # fallback to original
+                description = orig_issue.description
+
+        elif issue_type == "invalid_phone" and original_value:
+            data[target_row][col] = _corrupt_phone(rng, str(original_value))
+            description = f"Phone contains non-numeric characters"
+
+        elif issue_type in ("wrong_date_format", "invalid_date") and original_value:
+            try:
+                corrupted, actual_type = _corrupt_date(rng, str(original_value))
+                data[target_row][col] = corrupted
+                issue_type = actual_type
+                description = f"Date '{corrupted}' is not valid YYYY-MM-DD"
+            except (IndexError, ValueError):
+                target_row = orig_issue.row
+
+        elif issue_type == "missing_value":
+            data[target_row][col] = ""
+            description = f"Value in column '{col}' is empty"
+
+        elif issue_type == "negative_number" and original_value:
+            try:
+                val = float(original_value)
+                if val > 0:
+                    data[target_row][col] = _corrupt_number_negative(rng, val)
+                    description = f"Value is negative ({data[target_row][col]})"
+                else:
+                    target_row = orig_issue.row
+            except (ValueError, TypeError):
+                target_row = orig_issue.row
+
+        elif issue_type == "outlier" and original_value:
+            low = params.get("low", 0)
+            high = params.get("high", 100)
+            try:
+                val = float(original_value)
+                data[target_row][col] = round(_corrupt_number_outlier(rng, val, low, high), 2)
+                description = f"Value {data[target_row][col]} is outside range [{low}, {high}]"
+            except (ValueError, TypeError):
+                target_row = orig_issue.row
+
+        elif issue_type == "inconsistent_format" and original_value:
+            canonical_set = params.get("canonical_set", set())
+            if str(original_value) in canonical_set:
+                data[target_row][col] = _corrupt_canonical(rng, str(original_value), canonical_set)
+                description = f"Value '{data[target_row][col]}' doesn't match canonical form"
+            else:
+                target_row = orig_issue.row
+
+        elif issue_type == "excess_whitespace" and original_value:
+            data[target_row][col] = _corrupt_whitespace(rng, str(original_value))
+            description = f"Excess whitespace in '{col}'"
+
+        elif issue_type == "score_out_of_range" and original_value:
+            low = params.get("low", 0)
+            high = params.get("high", 10)
+            bad_val = rng.choice([rng.uniform(-5, low - 0.1), rng.uniform(high + 0.1, high + 10)])
+            data[target_row][col] = round(bad_val, 1)
+            description = f"Score {data[target_row][col]} is outside range [{low}, {high}]"
+
+        elif issue_type in ("referential_integrity", "temporal_inconsistency", "cross_column_violation"):
+            # Complex types: keep original row assignment
+            target_row = orig_issue.row
+            description = orig_issue.description
+
+        else:
+            # Unknown type or can't corrupt: keep original
+            target_row = orig_issue.row
+            description = orig_issue.description
+
+        new_issues.append(Issue(
+            issue_id=issue_id, row=target_row, column=col,
+            issue_type=issue_type, description=description,
+            validation_params=params,
+        ))
+
+    # Handle duplicate issues: pick a random clean row to duplicate
+    for orig_dup in dup_issues:
+        issue_counter += 1
+        issue_id = f"S{seed}-{issue_counter}"
+        # Pick a random row to duplicate at the end
+        source_row = rng.randint(0, len(data) - 1)
+        dup_data = copy.deepcopy(data[source_row])
+        dup_row_idx = len(data)
+        data.append(dup_data)
+        new_issues.append(Issue(
+            issue_id=issue_id, row=dup_row_idx, column="",
+            issue_type="duplicate_row",
+            description=f"Duplicate of row {source_row}",
+            original_row_data=copy.deepcopy(dup_data),
+        ))
+
+    # Rebuild the task with seeded data
+    base.data = data
+    base.issues = new_issues
+    base.max_steps = max(base.max_steps, len(new_issues) * 2 + len(base.columns) + 1)
+    return base

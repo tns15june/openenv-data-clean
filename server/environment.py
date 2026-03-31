@@ -140,7 +140,7 @@ class DataCleanEnvironment(Environment):
         **kwargs: Any,
     ) -> DataCleanObservation:
         task_id = kwargs.get("task_id", "customer_contacts")
-        self._task = get_task(task_id)
+        self._task = get_task(task_id, seed=seed)
 
         self._current_data = copy.deepcopy(self._task.data)
         self._issue_status = {issue.issue_id: False for issue in self._task.issues}

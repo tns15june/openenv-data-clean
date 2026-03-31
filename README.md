@@ -5,6 +5,12 @@ colorFrom: blue
 colorTo: green
 sdk: docker
 app_port: 8000
+tags:
+  - openenv
+  - rl-environment
+  - data-cleaning
+  - evaluation
+  - trl
 ---
 
 # DataCleanEnv — Data Quality Analysis & Cleaning Environment
@@ -129,6 +135,71 @@ Scores vary by model capability. Expected ranges:
 | sales_records (medium) | 0.1–0.3 | 0.4–0.7 |
 | employee_records (hard) | 0.0–0.1 | 0.1–0.4 |
 | financial_transactions (expert) | 0.0–0.1 | 0.1–0.3 |
+
+## Seed-Based Data Variation
+
+Each task supports reproducible randomized episodes via the `seed` parameter:
+
+```bash
+# Deterministic (original data):
+POST /reset {"task_id": "customer_contacts"}
+
+# Randomized variant (same issue types, different corrupted rows):
+POST /reset {"task_id": "customer_contacts", "seed": 42}
+```
+
+This enables RL training with diverse episodes — the agent must learn data cleaning *skills*, not memorize fixed answers.
+
+## Training with TRL (GRPO)
+
+The environment integrates with TRL's `GRPOTrainer` via the `DataCleanToolEnv` class in `train.py`:
+
+```bash
+# Start the server
+uvicorn server.app:app --host 0.0.0.0 --port 8000
+
+# Run training
+python train.py --model "Qwen/Qwen3-0.6B"
+```
+
+The tool environment exposes `inspect()`, `fix()`, `delete()`, `submit()` as individual methods with docstrings that TRL auto-discovers for function calling.
+
+## Benchmarking
+
+Evaluate any model across all tasks:
+
+```bash
+# Single evaluation
+python eval.py --model "meta-llama/Llama-3.1-8B-Instruct"
+
+# Multi-seed evaluation (measures variance)
+python eval.py --seeds 5 --json
+
+# Specific tasks only
+python eval.py --tasks customer_contacts sales_records
+```
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────┐
+│                  DataCleanEnv                    │
+├──────────┬──────────┬───────────┬───────────────┤
+│ /reset   │ /step    │ /ws       │ /web/         │
+│ /state   │ /health  │ /mcp      │ /docs         │
+├──────────┴──────────┴───────────┴───────────────┤
+│  server/environment.py — State Machine          │
+│  ┌──────────┐  ┌──────────┐  ┌────────────┐    │
+│  │ tasks.py │  │graders.py│  │action_parse│    │
+│  │ 4 tasks  │  │12 validators│ │robust parse│    │
+│  │ + seeds  │  │          │  │            │    │
+│  └──────────┘  └──────────┘  └────────────┘    │
+├─────────────────────────────────────────────────┤
+│  inference.py — Plan-Then-Execute Agent         │
+│  train.py     — TRL GRPO Training Pipeline      │
+│  eval.py      — Model Benchmarking              │
+└─────────────────────────────────────────────────┘
+```
 
 ## Technical Details
 
