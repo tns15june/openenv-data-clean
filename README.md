@@ -125,16 +125,21 @@ python inference.py
 | `/ws` | WS | WebSocket for stateful agent sessions |
 | `/mcp` | POST/WS | MCP tool support for compatible agents |
 
-## Baseline Scores
+## Benchmark Results
 
-Scores vary by model capability. Expected ranges:
+Tested with plan-then-execute inference strategy across 4 models:
 
-| Task | Easy Model | Frontier Model |
-|------|-----------|----------------|
-| customer_contacts (easy) | 0.3–0.5 | 0.7–1.0 |
-| sales_records (medium) | 0.1–0.3 | 0.4–0.7 |
-| employee_records (hard) | 0.0–0.1 | 0.1–0.4 |
-| financial_transactions (expert) | 0.0–0.1 | 0.1–0.3 |
+| Model | Easy | Medium | Hard | Expert | Average |
+|-------|------|--------|------|--------|---------|
+| Llama-3.3-70B-Instruct | **1.00** | **1.00** | **0.73** | **0.75** | **0.87** |
+| Qwen2.5-72B-Instruct | 0.78 | 1.00 | 0.52 | 0.82 | 0.78 |
+| DeepSeek-V3 | 1.00 | 0.87 | 0.33 | 0.00 | 0.55 |
+| Llama-3.1-8B-Instruct | 0.73 | 0.00 | 0.00 | 0.00 | 0.18 |
+
+Key findings:
+- 70B+ models achieve near-perfect scores on easy/medium tasks
+- Hard/expert tasks require strong multi-column reasoning
+- Plan-then-execute strategy scales well with model capability
 
 ## Seed-Based Data Variation
 
