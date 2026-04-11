@@ -30,15 +30,12 @@ from client import DataCleanEnv
 from models import DataCleanAction, DataCleanObservation
 
 # ---------------------------------------------------------------------------
-# Config
+# Config — read at import time but API vars re-read in main() to catch
+# late-injected env vars from the validator.
 # ---------------------------------------------------------------------------
-API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
-API_KEY = os.getenv("API_KEY") or os.getenv("HF_TOKEN", "")
-MODEL_NAME = os.getenv("MODEL_NAME", "")
-
 BENCHMARK_URL = os.getenv(
     "BENCHMARK_URL",
-    "https://tns-openenv-data-clean.hf.space",
+    os.getenv("ENV_URL", "https://tns-openenv-data-clean.hf.space"),
 )
 BENCHMARK = os.getenv("BENCHMARK", "data_clean_env")
 
@@ -180,13 +177,13 @@ def extract_action(response_text: str) -> str:
 # ---------------------------------------------------------------------------
 # Run a single task
 # ---------------------------------------------------------------------------
-def run_task(client: OpenAI, env, task_id: str) -> None:
+def run_task(client: OpenAI, env, task_id: str, model_name: str = "") -> None:
     rewards: list[float] = []
     step_count = 0
     score = 0.0
     success = False
 
-    log_start(task=task_id, env=BENCHMARK, model=MODEL_NAME)
+    log_start(task=task_id, env=BENCHMARK, model=model_name)
 
     try:
         # --- Reset ---
@@ -264,7 +261,7 @@ def run_task(client: OpenAI, env, task_id: str) -> None:
 
         try:
             completion = client.chat.completions.create(
-                model=MODEL_NAME,
+                model=model_name,
                 messages=[
                     {"role": "system", "content": PLANNING_PROMPT},
                     {"role": "user", "content": planning_message},
@@ -308,7 +305,7 @@ def run_task(client: OpenAI, env, task_id: str) -> None:
             while not done and remaining > 0:
                 try:
                     comp = client.chat.completions.create(
-                        model=MODEL_NAME,
+                        model=model_name,
                         messages=fallback_messages,
                         temperature=0.0,
                         max_tokens=300,
@@ -377,12 +374,25 @@ def run_task(client: OpenAI, env, task_id: str) -> None:
 # Main
 # ---------------------------------------------------------------------------
 def main() -> None:
-    client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
+    import sys
+
+    # Read API vars fresh — validator injects these at runtime
+    api_base_url = os.environ.get("API_BASE_URL", "https://router.huggingface.co/v1")
+    api_key = os.environ.get("API_KEY") or os.environ.get("HF_TOKEN", "")
+    model_name = os.environ.get("MODEL_NAME", "")
+
+    # Debug: log config to stderr (never stdout — validator parses that)
+    print(f"[CONFIG] API_BASE_URL={api_base_url}", file=sys.stderr, flush=True)
+    print(f"[CONFIG] API_KEY={'set('+api_key[:8]+'...)' if api_key else 'EMPTY'}", file=sys.stderr, flush=True)
+    print(f"[CONFIG] MODEL_NAME={model_name}", file=sys.stderr, flush=True)
+    print(f"[CONFIG] BENCHMARK_URL={BENCHMARK_URL}", file=sys.stderr, flush=True)
+
+    client = OpenAI(base_url=api_base_url, api_key=api_key)
 
     env_client = DataCleanEnv(base_url=BENCHMARK_URL)
     with env_client.sync() as env:
         for task_id in TASKS:
-            run_task(client, env, task_id)
+            run_task(client, env, task_id, model_name)
 
 
 if __name__ == "__main__":
