@@ -167,14 +167,18 @@ def main() -> None:
         print(f"\n{'=' * 60}")
         print(f"Task: {task_id}")
         print(f"{'=' * 60}")
+        print(f"[START] task={task_id}", flush=True)
 
         obs = env_reset(task_id)
         if "observation" in obs:
             obs = obs["observation"]
 
+        step_count = 0
         done = obs.get("done", False)
         if done:
-            results[task_id] = obs.get("current_score", 0.0)
+            score = obs.get("current_score", 0.0)
+            results[task_id] = score
+            print(f"[END] task={task_id} score={score} steps=0", flush=True)
             continue
 
         total_issues = obs.get("total_issues", 0)
@@ -190,7 +194,6 @@ def main() -> None:
                     columns.append(col_name)
 
         inspection_results = {}
-        step_count = 0
         for col in columns:
             if done:
                 break
@@ -201,12 +204,16 @@ def main() -> None:
             if "observation" in obs:
                 obs = obs["observation"]
             done = obs.get("done", False)
+            reward = obs.get("current_score", 0.0)
+            print(f"[STEP] step={step_count} reward={reward}", flush=True)
             feedback = obs.get("feedback", "")
             inspection_results[col] = feedback
 
         if done:
-            results[task_id] = obs.get("current_score", 0.0)
-            print(f"  Done during inspection. Score: {results[task_id]:.4f}")
+            score = obs.get("current_score", 0.0)
+            results[task_id] = score
+            print(f"  Done during inspection. Score: {score:.4f}")
+            print(f"[END] task={task_id} score={score} steps={step_count}", flush=True)
             continue
 
         # --- Phase 1.5: Filter to only columns WITH issues ---
@@ -261,10 +268,14 @@ def main() -> None:
             plan_text = completion.choices[0].message.content or ""
         except Exception as exc:
             print(f"  LLM error: {exc}. Submitting.")
+            step_count += 1
             obs = env_step("submit()")
             if "observation" in obs:
                 obs = obs["observation"]
-            results[task_id] = obs.get("current_score", 0.0)
+            score = obs.get("current_score", 0.0)
+            results[task_id] = score
+            print(f"[STEP] step={step_count} reward={score}", flush=True)
+            print(f"[END] task={task_id} score={score} steps={step_count}", flush=True)
             continue
 
         plan = extract_json_plan(plan_text)
@@ -306,14 +317,18 @@ def main() -> None:
                 if "observation" in obs:
                     obs = obs["observation"]
                 done = obs.get("done", False)
+                reward = obs.get("current_score", 0.0)
+                print(f"[STEP] step={step_count} reward={reward}", flush=True)
                 remaining = obs.get("actions_remaining", 0)
                 if not done:
                     fb = obs.get("feedback", "")
                     fallback_messages.append({"role": "user", "content": f"Result: {fb}\nFixed: {obs.get('issues_fixed',0)}/{obs.get('total_issues',0)}. Remaining steps: {remaining}."})
                 if len(fallback_messages) > 30:
                     fallback_messages = [fallback_messages[0]] + fallback_messages[-28:]
-            results[task_id] = obs.get("current_score", 0.0)
-            print(f"  Final score for {task_id}: {results[task_id]:.4f}")
+            score = obs.get("current_score", 0.0)
+            results[task_id] = score
+            print(f"  Final score for {task_id}: {score:.4f}")
+            print(f"[END] task={task_id} score={score} steps={step_count}", flush=True)
             continue
 
         print(f"  Plan has {len(plan)} actions (expected ~{total_issues}).")
@@ -334,6 +349,8 @@ def main() -> None:
             if "observation" in obs:
                 obs = obs["observation"]
             done = obs.get("done", False)
+            reward = obs.get("current_score", 0.0)
+            print(f"[STEP] step={step_count} reward={reward}", flush=True)
             remaining = obs.get("actions_remaining", 0)
 
             feedback = obs.get("feedback", "")
@@ -347,10 +364,13 @@ def main() -> None:
             obs = env_step("submit()")
             if "observation" in obs:
                 obs = obs["observation"]
+            reward = obs.get("current_score", 0.0)
+            print(f"[STEP] step={step_count} reward={reward}", flush=True)
 
         score = obs.get("current_score", 0.0)
         results[task_id] = score
         print(f"  Final score for {task_id}: {score:.4f}")
+        print(f"[END] task={task_id} score={score} steps={step_count}", flush=True)
 
     # --- Results Summary ---
     print(f"\n{'=' * 60}")
