@@ -9,17 +9,25 @@ MANDATORY
 
 - The inference script must be named `inference.py` and placed in the root directory of the project
 - Participants must use OpenAI Client for all LLM calls using above variables
+
+This script emits exactly these stdout line types:
+- [START] ...
+- [STEP]  ... (one per step)
+- [END]   ... (always)
 """
+
+from __future__ import annotations
 
 import json
 import os
 import re
-import sys
 import textwrap
 from typing import Any, Dict, List, Optional
 
 from openai import OpenAI
-import requests
+
+from client import DataCleanEnv
+from models import DataCleanAction, DataCleanObservation
 
 # ---------------------------------------------------------------------------
 # Config
@@ -27,9 +35,41 @@ import requests
 API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
 API_KEY = os.getenv("HF_TOKEN") or os.getenv("API_KEY", "")
 MODEL_NAME = os.getenv("MODEL_NAME", "")
-ENV_URL = os.getenv("ENV_URL", "http://localhost:8000")
+
+BENCHMARK_URL = os.getenv(
+    "BENCHMARK_URL",
+    "https://tns-openenv-data-clean.hf.space",
+)
+BENCHMARK = os.getenv("BENCHMARK", "data_clean_env")
 
 TASKS = ["customer_contacts", "sales_records", "employee_records", "financial_transactions"]
+
+# ---------------------------------------------------------------------------
+# Structured logging
+# ---------------------------------------------------------------------------
+def log_start(task: str, env: str, model: str) -> None:
+    print(f"[START] task={task} env={env} model={model}", flush=True)
+
+
+def log_step(step: int, action: str, reward: float, done: bool, error: str | None) -> None:
+    err = _single_line(error) if error else "null"
+    print(
+        f"[STEP] step={step} action={action} reward={reward:.2f} done={str(done).lower()} error={err}",
+        flush=True,
+    )
+
+
+def log_end(success: bool, steps: int, score: float, rewards: list[float]) -> None:
+    reward_csv = ",".join(f"{r:.2f}" for r in rewards) if rewards else "0.00"
+    print(
+        f"[END] success={str(success).lower()} steps={steps} score={score:.3f} rewards={reward_csv}",
+        flush=True,
+    )
+
+
+def _single_line(text: str | None) -> str:
+    return (text or "").replace("\n", " ").replace("\r", " ").strip()
+
 
 # ---------------------------------------------------------------------------
 # System prompt — Conservative plan-then-execute
@@ -66,25 +106,6 @@ PLANNING_PROMPT = textwrap.dedent("""\
     EXAMPLE for a 3-issue dataset:
     [{"action":"fix","row":3,"column":"email","value":"alice@mail.com"},{"action":"fix","row":7,"column":"phone","value":"555-012-3408"},{"action":"delete","row":14}]
 """)
-
-
-# ---------------------------------------------------------------------------
-# HTTP helpers
-# ---------------------------------------------------------------------------
-def env_reset(task_id: str) -> Dict[str, Any]:
-    resp = requests.post(f"{ENV_URL}/reset", json={"task_id": task_id}, timeout=30)
-    resp.raise_for_status()
-    return resp.json()
-
-
-def env_step(command: str) -> Dict[str, Any]:
-    resp = requests.post(
-        f"{ENV_URL}/step",
-        json={"action": {"command": command}},
-        timeout=30,
-    )
-    resp.raise_for_status()
-    return resp.json()
 
 
 # ---------------------------------------------------------------------------
@@ -157,36 +178,31 @@ def extract_action(response_text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Main — Plan-Then-Execute
+# Run a single task
 # ---------------------------------------------------------------------------
-def main() -> None:
-    client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
-    results = {}
+def run_task(client: OpenAI, env, task_id: str) -> None:
+    rewards: list[float] = []
+    step_count = 0
+    score = 0.0
+    success = False
 
-    for task_id in TASKS:
-        print(f"\n{'=' * 60}")
-        print(f"Task: {task_id}")
-        print(f"{'=' * 60}")
-        print(f"[START] task={task_id}", flush=True)
+    log_start(task=task_id, env=BENCHMARK, model=MODEL_NAME)
 
-        obs = env_reset(task_id)
-        if "observation" in obs:
-            obs = obs["observation"]
+    try:
+        # --- Reset ---
+        result = env.reset(task_id=task_id)
+        obs = result.observation
+        done = result.done
 
-        step_count = 0
-        done = obs.get("done", False)
         if done:
-            score = obs.get("current_score", 0.0)
-            results[task_id] = score
-            print(f"[END] task={task_id} score={score} steps=0", flush=True)
-            continue
+            score = obs.current_score
+            return
 
-        total_issues = obs.get("total_issues", 0)
+        total_issues = obs.total_issues
 
         # --- Phase 1: Auto-inspect all columns ---
         columns = []
-        col_info = obs.get("column_info", "")
-        for line in col_info.strip().splitlines():
+        for line in obs.column_info.strip().splitlines():
             line = line.strip()
             if ":" in line:
                 col_name = line.split(":")[0].strip()
@@ -199,41 +215,34 @@ def main() -> None:
                 break
             step_count += 1
             cmd = f'inspect("{col}")'
-            print(f"  Step {step_count}: {cmd}")
-            obs = env_step(cmd)
-            if "observation" in obs:
-                obs = obs["observation"]
-            done = obs.get("done", False)
-            reward = obs.get("current_score", 0.0)
-            print(f"[STEP] step={step_count} reward={reward}", flush=True)
-            feedback = obs.get("feedback", "")
-            inspection_results[col] = feedback
+            result = env.step(DataCleanAction(command=cmd))
+            obs = result.observation
+            done = result.done
+            reward = float(result.reward or 0.0)
+            rewards.append(reward)
+
+            log_step(step=step_count, action=cmd, reward=reward, done=done, error=None)
+
+            inspection_results[col] = obs.feedback
 
         if done:
-            score = obs.get("current_score", 0.0)
-            results[task_id] = score
-            print(f"  Done during inspection. Score: {score:.4f}")
-            print(f"[END] task={task_id} score={score} steps={step_count}", flush=True)
-            continue
+            score = obs.current_score
+            success = score >= 0.5
+            return
 
         # --- Phase 1.5: Filter to only columns WITH issues ---
         flagged_inspections = {}
         for col, feedback in inspection_results.items():
-            # Extract "Issues remaining in this column: N"
             m = re.search(r"Issues remaining in this column:\s*(\d+)", feedback)
             issue_count = int(m.group(1)) if m else 0
             if issue_count > 0:
                 flagged_inspections[col] = feedback
 
-        # Also check for suspicious values in inspection even if issue count is 0
         for col, feedback in inspection_results.items():
             if col not in flagged_inspections and "Suspicious:" in feedback:
                 flagged_inspections[col] = feedback
 
-        print(f"  Columns with issues: {list(flagged_inspections.keys())} ({len(flagged_inspections)}/{len(columns)})")
-
         # --- Phase 2: Ask LLM to plan fixes ---
-        # Only show the LLM columns that have issues + the data table
         if flagged_inspections:
             inspection_text = "\n\n".join(
                 f"[{col}]\n{fb}" for col, fb in flagged_inspections.items()
@@ -242,18 +251,17 @@ def main() -> None:
             inspection_text = "(No specific column issues flagged. Check for duplicate rows.)"
 
         planning_message = (
-            f"Task: {obs.get('task_id', '?')} ({obs.get('difficulty', '?')})\n"
+            f"Task: {obs.task_id} ({obs.difficulty})\n"
             f"Total issues to find and fix: {total_issues}\n\n"
-            f"Task description:\n{obs.get('task_description', '')}\n\n"
-            f"Column definitions:\n{obs.get('column_info', '')}\n\n"
+            f"Task description:\n{obs.task_description}\n\n"
+            f"Column definitions:\n{obs.column_info}\n\n"
             f"FLAGGED COLUMNS (only fix cells in these columns or duplicate rows):\n{inspection_text}\n\n"
-            f"Current data:\n{obs.get('data_preview', '')}\n\n"
+            f"Current data:\n{obs.data_preview}\n\n"
             f"Produce a JSON array with EXACTLY the fixes needed. "
             f"Expected: around {total_issues} actions (fixes + deletes). "
             f"Do NOT produce more than {total_issues + 3} actions."
         )
 
-        print(f"  Calling LLM for fix plan...")
         try:
             completion = client.chat.completions.create(
                 model=MODEL_NAME,
@@ -267,26 +275,26 @@ def main() -> None:
             )
             plan_text = completion.choices[0].message.content or ""
         except Exception as exc:
-            print(f"  LLM error: {exc}. Submitting.")
+            # LLM error — submit immediately
             step_count += 1
-            obs = env_step("submit()")
-            if "observation" in obs:
-                obs = obs["observation"]
-            score = obs.get("current_score", 0.0)
-            results[task_id] = score
-            print(f"[STEP] step={step_count} reward={score}", flush=True)
-            print(f"[END] task={task_id} score={score} steps={step_count}", flush=True)
-            continue
+            cmd = "submit()"
+            result = env.step(DataCleanAction(command=cmd))
+            obs = result.observation
+            done = result.done
+            reward = float(result.reward or 0.0)
+            rewards.append(reward)
+            log_step(step=step_count, action=cmd, reward=reward, done=True, error=_single_line(str(exc)))
+            score = obs.current_score
+            return
 
         plan = extract_json_plan(plan_text)
 
         # --- Sanity check: reject bloated plans ---
         if plan and len(plan) > total_issues + 5:
-            print(f"  Plan too large ({len(plan)} actions for {total_issues} issues). Trimming to {total_issues + 3}.")
             plan = plan[:total_issues + 3]
 
         if not plan:
-            print(f"  Failed to parse JSON plan. Falling back to single-action mode.")
+            # --- Fallback: single-action mode ---
             fallback_messages = [
                 {"role": "system", "content": (
                     "You are a data quality analyst. Respond with EXACTLY ONE command per turn.\n"
@@ -296,7 +304,7 @@ def main() -> None:
                 )},
                 {"role": "user", "content": planning_message},
             ]
-            remaining = obs.get("actions_remaining", 0)
+            remaining = obs.actions_remaining
             while not done and remaining > 0:
                 try:
                     comp = client.chat.completions.create(
@@ -312,74 +320,69 @@ def main() -> None:
                 action_cmd = extract_action(resp_text)
                 fallback_messages.append({"role": "assistant", "content": action_cmd})
                 step_count += 1
-                print(f"  Step {step_count} (fallback): {action_cmd}")
-                obs = env_step(action_cmd)
-                if "observation" in obs:
-                    obs = obs["observation"]
-                done = obs.get("done", False)
-                reward = obs.get("current_score", 0.0)
-                print(f"[STEP] step={step_count} reward={reward}", flush=True)
-                remaining = obs.get("actions_remaining", 0)
+                result = env.step(DataCleanAction(command=action_cmd))
+                obs = result.observation
+                done = result.done
+                reward = float(result.reward or 0.0)
+                rewards.append(reward)
+                log_step(step=step_count, action=action_cmd, reward=reward, done=done, error=None)
+                remaining = obs.actions_remaining
                 if not done:
-                    fb = obs.get("feedback", "")
-                    fallback_messages.append({"role": "user", "content": f"Result: {fb}\nFixed: {obs.get('issues_fixed',0)}/{obs.get('total_issues',0)}. Remaining steps: {remaining}."})
+                    fb = obs.feedback
+                    fallback_messages.append({"role": "user", "content": f"Result: {fb}\nFixed: {obs.issues_fixed}/{obs.total_issues}. Remaining steps: {remaining}."})
                 if len(fallback_messages) > 30:
                     fallback_messages = [fallback_messages[0]] + fallback_messages[-28:]
-            score = obs.get("current_score", 0.0)
-            results[task_id] = score
-            print(f"  Final score for {task_id}: {score:.4f}")
-            print(f"[END] task={task_id} score={score} steps={step_count}", flush=True)
-            continue
-
-        print(f"  Plan has {len(plan)} actions (expected ~{total_issues}).")
+            score = obs.current_score
+            success = score >= 0.5
+            return
 
         # --- Phase 3: Execute plan ---
-        remaining = obs.get("actions_remaining", 0)
-        for i, action_item in enumerate(plan):
+        remaining = obs.actions_remaining
+        for action_item in plan:
             if done or remaining <= 1:
                 break
-
             cmd = plan_to_command(action_item)
             if not cmd:
                 continue
-
             step_count += 1
-            print(f"  Step {step_count}: {cmd}")
-            obs = env_step(cmd)
-            if "observation" in obs:
-                obs = obs["observation"]
-            done = obs.get("done", False)
-            reward = obs.get("current_score", 0.0)
-            print(f"[STEP] step={step_count} reward={reward}", flush=True)
-            remaining = obs.get("actions_remaining", 0)
-
-            feedback = obs.get("feedback", "")
-            if "not yet resolved" in feedback.lower() and not done:
-                print(f"    Warning: {feedback[:80]}")
+            result = env.step(DataCleanAction(command=cmd))
+            obs = result.observation
+            done = result.done
+            reward = float(result.reward or 0.0)
+            rewards.append(reward)
+            log_step(step=step_count, action=cmd, reward=reward, done=done, error=None)
+            remaining = obs.actions_remaining
 
         # --- Phase 4: Submit ---
         if not done:
             step_count += 1
-            print(f"  Step {step_count}: submit()")
-            obs = env_step("submit()")
-            if "observation" in obs:
-                obs = obs["observation"]
-            reward = obs.get("current_score", 0.0)
-            print(f"[STEP] step={step_count} reward={reward}", flush=True)
+            cmd = "submit()"
+            result = env.step(DataCleanAction(command=cmd))
+            obs = result.observation
+            reward = float(result.reward or 0.0)
+            rewards.append(reward)
+            log_step(step=step_count, action=cmd, reward=reward, done=True, error=None)
 
-        score = obs.get("current_score", 0.0)
-        results[task_id] = score
-        print(f"  Final score for {task_id}: {score:.4f}")
-        print(f"[END] task={task_id} score={score} steps={step_count}", flush=True)
+        score = obs.current_score
+        success = score >= 0.5
 
-    # --- Results Summary ---
-    print(f"\n{'=' * 60}")
-    print("RESULTS SUMMARY")
-    print(f"{'=' * 60}")
-    for task_id, score in results.items():
-        print(f"  {task_id}: {score:.4f}")
-    avg = sum(results.values()) / len(results) if results else 0.0
-    print(f"  Average: {avg:.4f}")
+    except Exception as exc:
+        log_step(step=step_count + 1, action="error", reward=0.0, done=True, error=_single_line(str(exc)))
+        success = False
+    finally:
+        log_end(success=success, steps=step_count, score=score, rewards=rewards)
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+def main() -> None:
+    client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
+
+    env_client = DataCleanEnv(base_url=BENCHMARK_URL)
+    with env_client.sync() as env:
+        for task_id in TASKS:
+            run_task(client, env, task_id)
 
 
 if __name__ == "__main__":
