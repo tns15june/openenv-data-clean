@@ -42,7 +42,7 @@ from openai import OpenAI
 # Config
 # ---------------------------------------------------------------------------
 API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
-API_KEY = os.getenv("HF_TOKEN") or os.getenv("API_KEY", "")
+API_KEY = os.getenv("API_KEY") or os.getenv("HF_TOKEN", "")
 MODEL_NAME = os.getenv("MODEL_NAME", "")
 ENV_URL = os.getenv("ENV_URL", "http://localhost:8000")
 
