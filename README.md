@@ -104,10 +104,10 @@ docker run -d -p 8000:8000 data-clean-env:latest
 ### Running Inference
 
 ```bash
-export API_BASE_URL="https://router.huggingface.co/v1"
+export API_BASE_URL="https://your-llm-endpoint/v1"   # validator injects the LiteLLM proxy URL during eval
+export API_KEY="your-api-key"                         # validator injects the proxy API key during eval
 export MODEL_NAME="your-model-name"
-export HF_TOKEN="your-token"
-export ENV_URL="http://localhost:8000"
+export BENCHMARK_URL="http://localhost:8000"          # or your HF Space URL
 
 python inference.py
 ```

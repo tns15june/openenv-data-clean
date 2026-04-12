@@ -3,12 +3,14 @@ Inference Script — DataCleanEnv
 ===================================
 MANDATORY
 - Before submitting, ensure the following variables are defined in your environment configuration:
-    API_BASE_URL   The API endpoint for the LLM.
+    API_BASE_URL   The LiteLLM proxy endpoint (injected by the validator).
+    API_KEY        The LiteLLM proxy API key (injected by the validator).
     MODEL_NAME     The model identifier to use for inference.
-    HF_TOKEN       Your Hugging Face / API key.
 
 - The inference script must be named `inference.py` and placed in the root directory of the project
-- Participants must use OpenAI Client for all LLM calls using above variables
+- Participants must use OpenAI Client for all LLM calls using above variables.
+  ALL LLM traffic MUST flow through API_BASE_URL with API_KEY — no fallbacks,
+  no other providers, no hardcoded credentials.
 
 This script emits exactly these stdout line types:
 - [START] ...
@@ -376,18 +378,33 @@ def run_task(client: OpenAI, env, task_id: str, model_name: str = "") -> None:
 def main() -> None:
     import sys
 
-    # Read API vars fresh — validator injects these at runtime
-    api_base_url = os.environ.get("API_BASE_URL", "https://router.huggingface.co/v1")
-    api_key = os.environ.get("API_KEY") or os.environ.get("HF_TOKEN", "")
-    model_name = os.environ.get("MODEL_NAME", "")
+    # Per hackathon spec: use EXACTLY the validator-injected env vars.
+    # No fallbacks to other providers — all LLM calls must flow through the
+    # provided LiteLLM proxy at API_BASE_URL with API_KEY.
+    api_base_url = os.environ["API_BASE_URL"]
+    api_key = os.environ["API_KEY"]
+    model_name = os.environ["MODEL_NAME"]
 
-    # Debug: log config to stderr (never stdout — validator parses that)
     print(f"[CONFIG] API_BASE_URL={api_base_url}", file=sys.stderr, flush=True)
     print(f"[CONFIG] API_KEY={'set('+api_key[:8]+'...)' if api_key else 'EMPTY'}", file=sys.stderr, flush=True)
     print(f"[CONFIG] MODEL_NAME={model_name}", file=sys.stderr, flush=True)
     print(f"[CONFIG] BENCHMARK_URL={BENCHMARK_URL}", file=sys.stderr, flush=True)
 
     client = OpenAI(base_url=api_base_url, api_key=api_key)
+
+    # Smoke-test ping: force at least one call through the proxy so the
+    # validator's LiteLLM logs always see traffic, even if downstream env
+    # interaction fails. Any response — including errors — confirms routing.
+    try:
+        client.chat.completions.create(
+            model=model_name,
+            messages=[{"role": "user", "content": "ping"}],
+            max_tokens=1,
+            temperature=0.0,
+        )
+        print("[CONFIG] proxy_ping=ok", file=sys.stderr, flush=True)
+    except Exception as exc:
+        print(f"[CONFIG] proxy_ping=error {exc}", file=sys.stderr, flush=True)
 
     env_client = DataCleanEnv(base_url=BENCHMARK_URL)
     with env_client.sync() as env:

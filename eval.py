@@ -20,9 +20,9 @@ Usage:
     python eval.py --json
 
 Environment variables:
-    API_BASE_URL   LLM API endpoint
+    API_BASE_URL   LLM API endpoint (LiteLLM proxy during hackathon eval)
+    API_KEY        API key for the LLM endpoint
     MODEL_NAME     Model identifier
-    HF_TOKEN       API key
     ENV_URL        Environment server URL
 """
 
@@ -41,8 +41,8 @@ from openai import OpenAI
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
-API_KEY = os.getenv("API_KEY") or os.getenv("HF_TOKEN", "")
+API_BASE_URL = os.getenv("API_BASE_URL", "")
+API_KEY = os.getenv("API_KEY", "")
 MODEL_NAME = os.getenv("MODEL_NAME", "")
 ENV_URL = os.getenv("ENV_URL", "http://localhost:8000")
 
