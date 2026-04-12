@@ -25,6 +25,7 @@ import os
 import re
 import textwrap
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlsplit, urlunsplit
 
 from openai import OpenAI
 
@@ -68,6 +69,24 @@ def log_end(success: bool, steps: int, score: float, rewards: list[float]) -> No
 
 def _single_line(text: str | None) -> str:
     return (text or "").replace("\n", " ").replace("\r", " ").strip()
+
+
+# Lazy-ping bookkeeping — see main(). Mutable container avoids `global`.
+_llm_metrics: Dict[str, int] = {"calls": 0}
+
+
+def _safe_url(url: str) -> str:
+    """Strip userinfo and query from a URL so it's safe to log."""
+    if not url:
+        return ""
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname or ""
+        if parts.port:
+            host = f"{host}:{parts.port}"
+        return urlunsplit((parts.scheme, host, parts.path, "", ""))
+    except ValueError:
+        return "<unparseable-url>"
 
 
 # ---------------------------------------------------------------------------
@@ -262,6 +281,7 @@ def run_task(client: OpenAI, env, task_id: str, model_name: str = "") -> None:
         )
 
         try:
+            _llm_metrics["calls"] += 1
             completion = client.chat.completions.create(
                 model=model_name,
                 messages=[
@@ -306,6 +326,7 @@ def run_task(client: OpenAI, env, task_id: str, model_name: str = "") -> None:
             remaining = obs.actions_remaining
             while not done and remaining > 0:
                 try:
+                    _llm_metrics["calls"] += 1
                     comp = client.chat.completions.create(
                         model=model_name,
                         messages=fallback_messages,
@@ -397,39 +418,45 @@ def main() -> None:
     model_name = os.environ["MODEL_NAME"]
 
     if os.environ.get("DEBUG_CONFIG"):
-        masked = f"{api_key[:4]}...{api_key[-4:]}" if len(api_key) >= 8 else "set"
-        print(f"[CONFIG] API_BASE_URL={api_base_url}", file=sys.stderr, flush=True)
-        print(f"[CONFIG] API_KEY={masked}", file=sys.stderr, flush=True)
+        # Never echo any portion of API_KEY, even masked. URLs are sanitized
+        # in case they carry embedded userinfo or query tokens.
+        print(f"[CONFIG] API_BASE_URL={_safe_url(api_base_url)}", file=sys.stderr, flush=True)
+        print(f"[CONFIG] API_KEY={'set' if api_key else 'EMPTY'}", file=sys.stderr, flush=True)
         print(f"[CONFIG] MODEL_NAME={model_name}", file=sys.stderr, flush=True)
-        print(f"[CONFIG] BENCHMARK_URL={BENCHMARK_URL}", file=sys.stderr, flush=True)
+        print(f"[CONFIG] BENCHMARK_URL={_safe_url(BENCHMARK_URL)}", file=sys.stderr, flush=True)
 
     client = OpenAI(base_url=api_base_url, api_key=api_key)
-
-    # Smoke-test ping (max_tokens=1, ~1 token of budget) guarantees the
-    # validator's proxy observes traffic even if a later task errors out.
-    # Skip via SKIP_PROXY_PING=1 when running against strict per-run budgets.
-    if not os.environ.get("SKIP_PROXY_PING"):
-        try:
-            client.chat.completions.create(
-                model=model_name,
-                messages=[{"role": "user", "content": "ok"}],
-                max_tokens=1,
-                temperature=0.0,
-                timeout=10,
-            )
-        except Exception as exc:
-            # Log only the exception class — never the raw message, which may
-            # echo proxy response bodies containing keys, IPs, or internal detail.
-            print(
-                f"[WARN] proxy_ping failed ({type(exc).__name__})",
-                file=sys.stderr,
-                flush=True,
-            )
 
     env_client = DataCleanEnv(base_url=BENCHMARK_URL)
     with env_client.sync() as env:
         for task_id in TASKS:
             run_task(client, env, task_id, model_name)
+
+    # Lazy proxy-ping: only fire if every task completed without attempting
+    # any LLM call (e.g., env crashed before Phase 2 on all 4 tasks). This
+    # guarantees the validator's LiteLLM proxy sees at least one request
+    # for routing verification, without burning budget in the normal path.
+    # Force-enable with FORCE_PROXY_PING=1; disable with SKIP_PROXY_PING=1.
+    if os.environ.get("SKIP_PROXY_PING"):
+        return
+    if _llm_metrics["calls"] > 0 and not os.environ.get("FORCE_PROXY_PING"):
+        return
+    try:
+        client.chat.completions.create(
+            model=model_name,
+            messages=[{"role": "user", "content": "ok"}],
+            max_tokens=1,
+            temperature=0.0,
+            timeout=10,
+        )
+    except Exception as exc:
+        # Log only the exception class — never the raw message, which may
+        # echo proxy response bodies containing keys, IPs, or internal detail.
+        print(
+            f"[WARN] proxy_ping failed ({type(exc).__name__})",
+            file=sys.stderr,
+            flush=True,
+        )
 
 
 if __name__ == "__main__":

@@ -109,13 +109,14 @@ export API_BASE_URL="https://your-llm-endpoint/v1"   # LiteLLM proxy URL
 export API_KEY="your-api-key"                         # LiteLLM proxy API key
 export MODEL_NAME="your-model-name"
 
-# Environment server URL. inference.py reads BENCHMARK_URL (falls back to
-# ENV_URL, then the public HF Space). eval.py reads ENV_URL / --env-url.
+# Environment server URL. Both inference.py and eval.py use the same
+# precedence: BENCHMARK_URL, then ENV_URL (legacy alias), then default.
 export BENCHMARK_URL="http://localhost:8000"          # or your HF Space URL
 
 # Optional toggles for inference.py:
-#   DEBUG_CONFIG=1      — emit [CONFIG] diagnostics to stderr
-#   SKIP_PROXY_PING=1   — skip the startup proxy ping in tight budgets
+#   DEBUG_CONFIG=1       — emit [CONFIG] diagnostics to stderr (URLs sanitized, API_KEY redacted)
+#   SKIP_PROXY_PING=1    — never fire the lazy proxy-ping safety net
+#   FORCE_PROXY_PING=1   — always fire the proxy ping, even when tasks made LLM calls
 
 python inference.py
 ```

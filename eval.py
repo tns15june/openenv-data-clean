@@ -20,10 +20,12 @@ Usage:
     python eval.py --json
 
 Environment variables:
-    API_BASE_URL   LLM API endpoint (LiteLLM proxy during hackathon eval)
-    API_KEY        API key for the LLM endpoint
-    MODEL_NAME     Model identifier
-    ENV_URL        Environment server URL
+    API_BASE_URL     LLM API endpoint (LiteLLM proxy during hackathon eval)
+    API_KEY          API key for the LLM endpoint
+    MODEL_NAME       Model identifier
+    BENCHMARK_URL    Environment server URL (ENV_URL accepted as a fallback
+                     for backward compat; BENCHMARK_URL is canonical, matching
+                     inference.py)
 """
 
 import argparse
@@ -46,7 +48,8 @@ from openai import OpenAI
 API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
 API_KEY = os.getenv("API_KEY") or os.getenv("HF_TOKEN", "")
 MODEL_NAME = os.getenv("MODEL_NAME", "")
-ENV_URL = os.getenv("ENV_URL") or os.getenv("BENCHMARK_URL", "http://localhost:8000")
+# Same precedence as inference.py: BENCHMARK_URL first, then ENV_URL, then default.
+BENCHMARK_URL = os.getenv("BENCHMARK_URL", os.getenv("ENV_URL", "http://localhost:8000"))
 
 ALL_TASKS = ["customer_contacts", "sales_records", "employee_records", "financial_transactions"]
 
@@ -66,14 +69,14 @@ def env_reset(task_id: str, seed: Optional[int] = None) -> Dict[str, Any]:
     payload: Dict[str, Any] = {"task_id": task_id}
     if seed is not None:
         payload["seed"] = seed
-    resp = requests.post(f"{ENV_URL}/reset", json=payload, timeout=30)
+    resp = requests.post(f"{BENCHMARK_URL}/reset", json=payload, timeout=30)
     resp.raise_for_status()
     data = resp.json()
     return data.get("observation", data)
 
 
 def env_step(command: str) -> Dict[str, Any]:
-    resp = requests.post(f"{ENV_URL}/step", json={"action": {"command": command}}, timeout=30)
+    resp = requests.post(f"{BENCHMARK_URL}/step", json={"action": {"command": command}}, timeout=30)
     resp.raise_for_status()
     data = resp.json()
     return data.get("observation", data)
@@ -169,14 +172,26 @@ def main():
     parser.add_argument("--model", default=MODEL_NAME or "meta-llama/Llama-3.1-8B-Instruct")
     parser.add_argument("--tasks", nargs="*", default=ALL_TASKS)
     parser.add_argument("--seeds", type=int, default=1, help="Number of seeds per task (1 = no seed)")
-    parser.add_argument("--env-url", default=ENV_URL)
+    parser.add_argument(
+        "--benchmark-url",
+        "--env-url",
+        dest="benchmark_url",
+        default=BENCHMARK_URL,
+        help="Environment server URL (legacy --env-url alias accepted).",
+    )
     parser.add_argument("--json", action="store_true", help="Output JSON")
     args = parser.parse_args()
 
-    global ENV_URL
-    ENV_URL = args.env_url
+    global BENCHMARK_URL
+    BENCHMARK_URL = args.benchmark_url
 
-    if not API_KEY:
+    # Re-read env vars inside main() — module-level constants may be stale when
+    # eval.py is imported from a notebook, wrapper, or subprocess that sets
+    # credentials after import.
+    api_base_url = os.getenv("API_BASE_URL", API_BASE_URL)
+    api_key = os.getenv("API_KEY") or os.getenv("HF_TOKEN", "") or API_KEY
+
+    if not api_key:
         print(
             "ERROR: no API credentials found. Set API_KEY (validator-style) or "
             "HF_TOKEN (local) before running eval.py.",
@@ -184,7 +199,7 @@ def main():
         )
         sys.exit(1)
 
-    client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
+    client = OpenAI(base_url=api_base_url, api_key=api_key)
     results: Dict[str, List[float]] = {}
 
     for task_id in args.tasks:
@@ -203,7 +218,7 @@ def main():
     if args.json:
         report = {
             "model": args.model,
-            "env_url": args.env_url,
+            "benchmark_url": args.benchmark_url,
             "results": {
                 task: {"scores": scores, "mean": statistics.mean(scores),
                        "stdev": statistics.stdev(scores) if len(scores) > 1 else 0.0}
