@@ -40,7 +40,7 @@ Each observation includes:
 |-------|------|-------------|
 | `task_id` | str | Active task identifier |
 | `task_description` | str | What the data represents and quality rules |
-| `difficulty` | str | "easy", "medium", or "hard" |
+| `difficulty` | str | "easy", "medium", "hard", or "expert" |
 | `data_preview` | str | Current dataset as formatted text table |
 | `column_info` | str | Column names, types, and descriptions |
 | `feedback` | str | Result of last action |
@@ -66,6 +66,11 @@ Each observation includes:
 - **40 rows, 9 columns** — emp_id, name, email, department, hire_date, termination_date, salary, manager_id, performance_score
 - **18 issues**: referential integrity violations (manager_id), temporal inconsistencies (termination before hire), salary outliers, invalid performance scores, department name inconsistencies, semantic duplicates, invalid dates, excess whitespace
 - **35 max steps**
+
+### Expert: Financial Transactions
+- **40 rows, 10 columns** — txn_id, account_id, counterparty, amount, currency, txn_date, category, description, status, reviewer_id
+- **15 issues**: missing transaction IDs, non-ISO currency codes, negative amounts, invalid date formats, non-canonical categories, excess whitespace in counterparty, approved/flagged rows missing reviewer_id, duplicate ledger entries
+- **45 max steps**
 
 ## Reward Design
 

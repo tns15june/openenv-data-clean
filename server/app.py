@@ -8,6 +8,7 @@ stateful HTTP endpoints for inference script compatibility.
 
 import asyncio
 import os
+from collections import OrderedDict
 from uuid import uuid4
 
 from fastapi import FastAPI, Body, Header
@@ -62,7 +63,7 @@ app = _framework_app
 # A default session ("default") is used when no header is provided,
 # so simple single-client usage (like inference.py) works out of the box.
 # ---------------------------------------------------------------------------
-_sessions: Dict[str, DataCleanEnvironment] = {}
+_sessions: "OrderedDict[str, DataCleanEnvironment]" = OrderedDict()
 _sessions_lock = asyncio.Lock()
 
 MAX_SESSIONS = 50
@@ -70,11 +71,14 @@ MAX_SESSIONS = 50
 
 async def _get_or_create_session(session_id: str) -> DataCleanEnvironment:
     async with _sessions_lock:
-        if session_id not in _sessions:
-            if len(_sessions) >= MAX_SESSIONS:
-                oldest = next(iter(_sessions))
-                del _sessions[oldest]
-            _sessions[session_id] = DataCleanEnvironment()
+        if session_id in _sessions:
+            # Mark as most-recently-used so true-LRU eviction doesn't drop
+            # an active session before an idle one.
+            _sessions.move_to_end(session_id)
+            return _sessions[session_id]
+        if len(_sessions) >= MAX_SESSIONS:
+            _sessions.popitem(last=False)
+        _sessions[session_id] = DataCleanEnvironment()
         return _sessions[session_id]
 
 

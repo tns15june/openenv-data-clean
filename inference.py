@@ -33,14 +33,19 @@ from client import DataCleanEnv
 from models import DataCleanAction, DataCleanObservation
 
 # ---------------------------------------------------------------------------
-# Config — read at import time but API vars re-read in main() to catch
-# late-injected env vars from the validator.
+# Config — ALL env vars are re-read inside main() so late-injected values
+# from wrappers / subprocess launchers take effect. Module-level values are
+# only used as development defaults.
 # ---------------------------------------------------------------------------
-BENCHMARK_URL = os.getenv(
-    "BENCHMARK_URL",
-    os.getenv("ENV_URL", "https://tns-openenv-data-clean.hf.space"),
-)
+_DEFAULT_BENCHMARK_URL = "https://tns-openenv-data-clean.hf.space"
 BENCHMARK = os.getenv("BENCHMARK", "data_clean_env")
+
+
+def _resolve_benchmark_url() -> str:
+    return os.environ.get(
+        "BENCHMARK_URL",
+        os.environ.get("ENV_URL", _DEFAULT_BENCHMARK_URL),
+    )
 
 TASKS = ["customer_contacts", "sales_records", "employee_records", "financial_transactions"]
 
@@ -157,7 +162,9 @@ def plan_to_command(action: Dict) -> Optional[str]:
         row = action.get("row", 0)
         col = action.get("column", "")
         val = str(action.get("value", ""))
-        return f'fix({row}, "{col}", "{val}")'
+        # json.dumps handles embedded quotes, backslashes, and control chars so
+        # values like O'Brien or 'say "hi"' don't break action_parser regexes.
+        return f"fix({row}, {json.dumps(col)}, {json.dumps(val)})"
     elif act_type == "delete":
         row = action.get("row", 0)
         return f"delete({row})"
@@ -294,7 +301,8 @@ def run_task(client: OpenAI, env, task_id: str, model_name: str = "") -> None:
             )
             plan_text = completion.choices[0].message.content or ""
         except Exception as exc:
-            # LLM error — submit immediately
+            # LLM error — submit immediately. Log only the exception class;
+            # raw messages may include provider/proxy response bodies.
             step_count += 1
             cmd = "submit()"
             result = env.step(DataCleanAction(command=cmd))
@@ -302,8 +310,12 @@ def run_task(client: OpenAI, env, task_id: str, model_name: str = "") -> None:
             done = result.done
             reward = float(result.reward or 0.0)
             rewards.append(reward)
-            log_step(step=step_count, action=cmd, reward=reward, done=True, error=_single_line(str(exc)))
+            log_step(
+                step=step_count, action=cmd, reward=reward, done=True,
+                error=f"llm_error:{type(exc).__name__}",
+            )
             score = obs.current_score
+            success = score >= 0.5
             return
 
         plan = extract_json_plan(plan_text)
@@ -324,7 +336,13 @@ def run_task(client: OpenAI, env, task_id: str, model_name: str = "") -> None:
                 {"role": "user", "content": planning_message},
             ]
             remaining = obs.actions_remaining
-            while not done and remaining > 0:
+            # Absolute cap: never burn more than this many LLM turns in the
+            # fallback loop, independent of env budget. Defends against a
+            # broken model that keeps issuing non-terminal commands.
+            FALLBACK_MAX_ITERS = 40
+            fallback_iters = 0
+            while not done and remaining > 0 and fallback_iters < FALLBACK_MAX_ITERS:
+                fallback_iters += 1
                 try:
                     _llm_metrics["calls"] += 1
                     comp = client.chat.completions.create(
@@ -387,7 +405,11 @@ def run_task(client: OpenAI, env, task_id: str, model_name: str = "") -> None:
         success = score >= 0.5
 
     except Exception as exc:
-        log_step(step=step_count + 1, action="error", reward=0.0, done=True, error=_single_line(str(exc)))
+        # Only the exception class — never raw text — reaches stdout.
+        log_step(
+            step=step_count + 1, action="error", reward=0.0, done=True,
+            error=f"task_error:{type(exc).__name__}",
+        )
         success = False
     finally:
         log_end(success=success, steps=step_count, score=score, rewards=rewards)
@@ -416,6 +438,10 @@ def main() -> None:
     api_base_url = os.environ["API_BASE_URL"]
     api_key = os.environ["API_KEY"]
     model_name = os.environ["MODEL_NAME"]
+    benchmark_url = _resolve_benchmark_url()
+    # Reset the lazy-ping counter so repeated main() invocations (tests,
+    # wrapper scripts) don't carry over prior call state.
+    _llm_metrics["calls"] = 0
 
     if os.environ.get("DEBUG_CONFIG"):
         # Never echo any portion of API_KEY, even masked. URLs are sanitized
@@ -423,11 +449,11 @@ def main() -> None:
         print(f"[CONFIG] API_BASE_URL={_safe_url(api_base_url)}", file=sys.stderr, flush=True)
         print(f"[CONFIG] API_KEY={'set' if api_key else 'EMPTY'}", file=sys.stderr, flush=True)
         print(f"[CONFIG] MODEL_NAME={model_name}", file=sys.stderr, flush=True)
-        print(f"[CONFIG] BENCHMARK_URL={_safe_url(BENCHMARK_URL)}", file=sys.stderr, flush=True)
+        print(f"[CONFIG] BENCHMARK_URL={_safe_url(benchmark_url)}", file=sys.stderr, flush=True)
 
     client = OpenAI(base_url=api_base_url, api_key=api_key)
 
-    env_client = DataCleanEnv(base_url=BENCHMARK_URL)
+    env_client = DataCleanEnv(base_url=benchmark_url)
     with env_client.sync() as env:
         for task_id in TASKS:
             run_task(client, env, task_id, model_name)

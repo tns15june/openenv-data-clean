@@ -21,8 +21,15 @@ class DataCleanAction(Action):
 
 
 class DataCleanObservation(Observation):
-    """Observation returned after each step."""
+    """Observation returned after each step.
 
+    `done` and `reward` are inherited from the OpenEnv Observation base. They
+    are redeclared here so callers can see the full schema without inspecting
+    the framework, and so breaking upstream changes surface as type errors.
+    """
+
+    done: bool = Field(default=False)
+    reward: float = Field(default=0.0)
     task_id: str = Field(default="")
     task_description: str = Field(default="")
     difficulty: str = Field(default="easy")
