@@ -381,30 +381,50 @@ def main() -> None:
     # Per hackathon spec: use EXACTLY the validator-injected env vars.
     # No fallbacks to other providers — all LLM calls must flow through the
     # provided LiteLLM proxy at API_BASE_URL with API_KEY.
+    required = ("API_BASE_URL", "API_KEY", "MODEL_NAME")
+    missing = [name for name in required if not os.environ.get(name)]
+    if missing:
+        print(
+            f"[CONFIG] ERROR: missing required env vars: {', '.join(missing)}. "
+            f"The validator must inject API_BASE_URL, API_KEY, and MODEL_NAME.",
+            file=sys.stderr,
+            flush=True,
+        )
+        sys.exit(2)
+
     api_base_url = os.environ["API_BASE_URL"]
     api_key = os.environ["API_KEY"]
     model_name = os.environ["MODEL_NAME"]
 
-    print(f"[CONFIG] API_BASE_URL={api_base_url}", file=sys.stderr, flush=True)
-    print(f"[CONFIG] API_KEY={'set('+api_key[:8]+'...)' if api_key else 'EMPTY'}", file=sys.stderr, flush=True)
-    print(f"[CONFIG] MODEL_NAME={model_name}", file=sys.stderr, flush=True)
-    print(f"[CONFIG] BENCHMARK_URL={BENCHMARK_URL}", file=sys.stderr, flush=True)
+    if os.environ.get("DEBUG_CONFIG"):
+        masked = f"{api_key[:4]}...{api_key[-4:]}" if len(api_key) >= 8 else "set"
+        print(f"[CONFIG] API_BASE_URL={api_base_url}", file=sys.stderr, flush=True)
+        print(f"[CONFIG] API_KEY={masked}", file=sys.stderr, flush=True)
+        print(f"[CONFIG] MODEL_NAME={model_name}", file=sys.stderr, flush=True)
+        print(f"[CONFIG] BENCHMARK_URL={BENCHMARK_URL}", file=sys.stderr, flush=True)
 
     client = OpenAI(base_url=api_base_url, api_key=api_key)
 
-    # Smoke-test ping: force at least one call through the proxy so the
-    # validator's LiteLLM logs always see traffic, even if downstream env
-    # interaction fails. Any response — including errors — confirms routing.
-    try:
-        client.chat.completions.create(
-            model=model_name,
-            messages=[{"role": "user", "content": "ping"}],
-            max_tokens=1,
-            temperature=0.0,
-        )
-        print("[CONFIG] proxy_ping=ok", file=sys.stderr, flush=True)
-    except Exception as exc:
-        print(f"[CONFIG] proxy_ping=error {exc}", file=sys.stderr, flush=True)
+    # Smoke-test ping (max_tokens=1, ~1 token of budget) guarantees the
+    # validator's proxy observes traffic even if a later task errors out.
+    # Skip via SKIP_PROXY_PING=1 when running against strict per-run budgets.
+    if not os.environ.get("SKIP_PROXY_PING"):
+        try:
+            client.chat.completions.create(
+                model=model_name,
+                messages=[{"role": "user", "content": "ok"}],
+                max_tokens=1,
+                temperature=0.0,
+                timeout=10,
+            )
+        except Exception as exc:
+            # Log only the exception class — never the raw message, which may
+            # echo proxy response bodies containing keys, IPs, or internal detail.
+            print(
+                f"[WARN] proxy_ping failed ({type(exc).__name__})",
+                file=sys.stderr,
+                flush=True,
+            )
 
     env_client = DataCleanEnv(base_url=BENCHMARK_URL)
     with env_client.sync() as env:

@@ -41,10 +41,12 @@ from openai import OpenAI
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-API_BASE_URL = os.getenv("API_BASE_URL", "")
-API_KEY = os.getenv("API_KEY", "")
+# eval.py is a local dev/benchmark tool — NOT the validator's inference.py.
+# It prefers the validator-style vars but falls back to HF for local runs.
+API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
+API_KEY = os.getenv("API_KEY") or os.getenv("HF_TOKEN", "")
 MODEL_NAME = os.getenv("MODEL_NAME", "")
-ENV_URL = os.getenv("ENV_URL", "http://localhost:8000")
+ENV_URL = os.getenv("ENV_URL") or os.getenv("BENCHMARK_URL", "http://localhost:8000")
 
 ALL_TASKS = ["customer_contacts", "sales_records", "employee_records", "financial_transactions"]
 
@@ -173,6 +175,14 @@ def main():
 
     global ENV_URL
     ENV_URL = args.env_url
+
+    if not API_KEY:
+        print(
+            "ERROR: no API credentials found. Set API_KEY (validator-style) or "
+            "HF_TOKEN (local) before running eval.py.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
     results: Dict[str, List[float]] = {}

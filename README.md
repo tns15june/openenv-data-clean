@@ -104,10 +104,18 @@ docker run -d -p 8000:8000 data-clean-env:latest
 ### Running Inference
 
 ```bash
-export API_BASE_URL="https://your-llm-endpoint/v1"   # validator injects the LiteLLM proxy URL during eval
-export API_KEY="your-api-key"                         # validator injects the proxy API key during eval
+# Required — validator injects these during hackathon eval; set manually for local runs.
+export API_BASE_URL="https://your-llm-endpoint/v1"   # LiteLLM proxy URL
+export API_KEY="your-api-key"                         # LiteLLM proxy API key
 export MODEL_NAME="your-model-name"
+
+# Environment server URL. inference.py reads BENCHMARK_URL (falls back to
+# ENV_URL, then the public HF Space). eval.py reads ENV_URL / --env-url.
 export BENCHMARK_URL="http://localhost:8000"          # or your HF Space URL
+
+# Optional toggles for inference.py:
+#   DEBUG_CONFIG=1      — emit [CONFIG] diagnostics to stderr
+#   SKIP_PROXY_PING=1   — skip the startup proxy ping in tight budgets
 
 python inference.py
 ```
